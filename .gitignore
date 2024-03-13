@@ -1,6 +1,9 @@
 # Project specific
 scratch/ginder_secrets.py
 
+# Blender backup files
+*.blend[0-9]
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
