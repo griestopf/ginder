@@ -1,7 +1,17 @@
+# Things to install in blender
+# Pip-Name -> import name
+# pip install pygit2               ->  import pygit2
+# pip install PyGithub             ->  from github import Github
+#                                      from github import Auth
+# pip install requests-oauthlib    ->  from requests_oauthlib import OAuth2Session
 import bpy
 import ensurepip
 import subprocess
+import sys
+
 ensurepip.bootstrap()
-pybin = bpy.app.binary_path_python
+# deprecated as of 2.91: pybin = bpy.app.binary_path_python. Instead use 
+pybin = sys.executable
 subprocess.check_call([pybin, '-m', 'pip', 'install', 'pygit2'])
 subprocess.check_call([pybin, '-m', 'pip', 'install', 'PyGithub'])
+subprocess.check_call([pybin, '-m', 'pip', 'install', 'requests-oauthlib'])
