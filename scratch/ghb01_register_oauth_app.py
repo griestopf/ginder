@@ -92,7 +92,7 @@ f.write(f"\nginder_token = '{token_str}'\n")
 f.close()
 
 # Test: Fetch a protected resource, i.e. user profile
-r = oa2.get('https://api.github.com/user')
+user = oa2.get('https://api.github.com/user')
 
 bytes = r.content.decode().replace("'", '"')
 json_content = json.loads(bytes)
