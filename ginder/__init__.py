@@ -11,7 +11,9 @@
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
 
-from requests_oauthlib import OAuth2Session
+import json
+from urllib.parse import urlparse
+from urllib.request import urlretrieve
 import bpy
 import os
 import sys
@@ -56,7 +58,7 @@ the_unique_name_of_the_install_prerequisites_button = "ginder.install_prerequisi
 the_unique_name_of_the_uninstall_prerequisites_button = "ginder.uninstall_prerequisites"
 the_unique_name_of_the_restart_blender_button = "ginder.restart_blender"
 the_unique_name_of_the_ginder_preferences_button = "ginder.preferences"
-
+the_unique_name_of_the_copy_registration_link_button = "ginder.copy_registration_link"
 
 #######################################################################################################
 #
@@ -64,7 +66,7 @@ the_unique_name_of_the_ginder_preferences_button = "ginder.preferences"
 #
 #######################################################################################################
 
-def connected_to_internet(url='https://www.example.com/', timeout=5):
+def connected_to_internet(url='https://www.example.com/', timeout=10):
     try:
         _ = requests.head(url, timeout=timeout)
         return True
@@ -117,6 +119,45 @@ def check_prerequisites():
     except:
         ginder_prerequisites['requests_oauthlib'] = False
   
+
+
+def token_present() -> bool:
+    token = ''
+    try:
+        token = GinderPreferences.get_github_token()
+    except:
+        pass
+    return token
+    
+def check_token(token: str):
+    # Try to connnect to GitHub using the token passed to us
+    try:
+        import github
+        auth=github.Auth.Token(token=token)
+        g = github.Github(auth=auth)
+        user = g.get_user()
+    except:
+        GinderState.state = GinderState.PREREQ_INSTALLED
+        return
+    
+    g.close()
+
+    # We're still here: notify the main thread
+    run_in_main_thread(functools.partial(GinderPreferences.set_github_user,  user.name))
+    GinderState.state = GinderState.GITHUB_REGISTERED
+
+    # Try to load the user avatar
+    avatar_download_url = urlparse(user.avatar_url)
+    _, avatar_ext = os.path.splitext(avatar_download_url.path)
+    avatar_local_dir = os.path.join(os.path.dirname(__file__), "icons", f"avatar{avatar_ext}")
+
+    try:
+        urlretrieve(user.avatar_url, avatar_local_dir)
+        run_in_main_thread(lambda:preview_collections["main"].load("the_avatar_icon", avatar_local_dir, 'IMAGE'))
+    except Exception:
+        run_in_main_thread(lambda:report_error('ERROR', f'Could not load GitHub avatar from: {user.avatar_url}'))
+        pass
+
 #######################################################################################################
 
 class GinderState:
@@ -127,8 +168,9 @@ class GinderState:
     READY_FOR_RESTART = 3
     PREREQ_INSTALLED = 4
     REGISTERING_GITHUB = 5
-    GITHUB_REGISTERED = 6
-    LAST_STATE = 7
+    VALIDATING_TOKEN = 6
+    GITHUB_REGISTERED = 7
+    LAST_STATE = 8
 
     state = UNDEFINED
 
@@ -139,6 +181,7 @@ class GinderState:
         "Blender needs to be restarted", 
         "Ready to register with GitHub",
         "Finish GitHub registration process in browser",
+        "Checking GitHub access",
         "Ready"
         ]
 
@@ -149,16 +192,26 @@ class GinderState:
 
     @staticmethod
     def init():
+        # We are here, so we are installed!
+        GinderState.state = GinderState.ADDON_INSTALLED
+
         check_prerequisites()
-        if False: # TODO: check for user token
-            GinderState.state = GinderState.GITHUB_REGISTERED
-        elif ginder_prerequisites['pygit2'] and ginder_prerequisites['github'] and ginder_prerequisites['requests_oauthlib']:
-            GinderState.state = GinderState.PREREQ_INSTALLED
-        else:
-            GinderState.state = GinderState.ADDON_INSTALLED
+        if not (ginder_prerequisites['pygit2'] and ginder_prerequisites['github'] and ginder_prerequisites['requests_oauthlib']):
+            return
+
+        # All necessary python modules seem to be installed
+        GinderState.state = GinderState.PREREQ_INSTALLED
+
+        token = token_present()
+        if  not token:
+            return
+
+        # There is a token. Check if we can use it to access GitHub
+        GinderState.state = GinderState.VALIDATING_TOKEN
+        check_token_thread = threading.Thread(target=functools.partial(check_token, token))
+        check_token_thread.start()
         return GinderState.state
 
-GinderState.init()
 
 #######################################################################################################
 #
@@ -184,71 +237,97 @@ bpy.app.timers.register(execute_queued_functions)
 
 #######################################################################################################
 #
-#  PROGRESS BAR MANAGEMENT
+#  UI UPDATE AND PROGRESS BAR MANAGEMENT
 #
 #######################################################################################################
 
-class Progress:
+class UIUpdate:
+    REDRAW = 0
+    PROGRESS_FINITE = 1
+    PROGRESS_INFINITE = 2
+
+    progress_mode:int = REDRAW
+
     progress:float = 0
     duration:float = 0
     endat:float = 0
     startat:float = 0
-    bps:float = 0.05
+    spf:float = 1/2 # 2 frames per second, fair enough for status updates
     speed:float = 0
     message:str = ''
-    stop=True
+    area:bpy.types.Area = None
+    stopit:bool = False
 
     @staticmethod
-    def init(area:bpy.types.Area, bps:float = 0.05, msg:str = ''):
-        Progress.progress = 0
-        Progress.duration = 0
-        Progress.endat = 0
-        Progress.startat = 0
-        Progress.bps = bps
-        Progress.message = msg
-        Progress.stop = False
-        bpy.app.timers.register(functools.partial(Progress.pulse, area))
+    def start_pulse(area:bpy.types.Area = None, fps:float = 2):
+        if not bpy.app.timers.is_registered(UIUpdate.pulse):
+            UIUpdate.spf = 1/fps
+            UIUpdate.stopit = False
+            UIUpdate.area = area
 
-    def init_indefinite(area:bpy.types.Area, duration:float = 1, bps:float = 0.05, msg:str = ''):
-        Progress.progress = 0
-        Progress.duration = 0
-        Progress.endat = 1
-        Progress.startat = 0
-        Progress.bps = bps
-        Progress.message = msg
-        Progress.stop = False
-        Progress.speed = (Progress.endat - Progress.startat) / duration
-        bpy.app.timers.register(functools.partial(Progress.pulse_indefinite, area))
+            bpy.app.timers.register(UIUpdate.pulse)
+
+    @staticmethod
+    def stop_pulse():
+        UIUpdate.stopit = True
+                
+    @staticmethod
+    def progress_init(area:bpy.types.Area, fps:float = 10, msg:str = ''):
+        UIUpdate.progress = 0
+        UIUpdate.duration = 0
+        UIUpdate.endat = 0
+        UIUpdate.startat = 0
+        UIUpdate.spf = 1/fps
+        UIUpdate.message = msg
+        UIUpdate.area = area
+        UIUpdate.progress_mode = UIUpdate.PROGRESS_FINITE
+        UIUpdate.start_pulse()
+    
+    @staticmethod
+    def progress_init_indefinite(area:bpy.types.Area, duration:float = 1, fps:float = 10, msg:str = ''):
+        UIUpdate.progress = 0
+        UIUpdate.duration = 0
+        UIUpdate.endat = 1
+        UIUpdate.startat = 0
+        UIUpdate.spf = 1/fps
+        UIUpdate.message = msg
+        UIUpdate.speed = (UIUpdate.endat - UIUpdate.startat) / duration
+        UIUpdate.area = area
+        UIUpdate.progress_mode = UIUpdate.PROGRESS_INFINITE
+        UIUpdate.start_pulse()
+
+    @staticmethod
+    def end_progress():
+        UIUpdate.spf = 1/2 # 2 beats per second, fair enough for status updates
+        UIUpdate.progress_mode = UIUpdate.REDRAW
 
     @staticmethod
     def milestone(endat:float, msg:str=None, duration:float = 3):
         if msg:
-            Progress.message = msg
-        Progress.startat = Progress.progress
-        Progress.duration = duration
-        Progress.endat = endat
-        Progress.speed = (endat - Progress.startat) / duration
+            UIUpdate.message = msg
+        UIUpdate.startat = UIUpdate.progress
+        UIUpdate.duration = duration
+        UIUpdate.endat = endat
+        UIUpdate.speed = (endat - UIUpdate.startat) / duration
 
     @staticmethod
-    def pulse(area : bpy.types.Area):
-        if Progress.stop:
+    def pulse():
+        if UIUpdate.stopit:
             return None
-        Progress.progress += Progress.speed * Progress.bps
-        if Progress.progress >= Progress.startat + 0.5*(Progress.endat - Progress.startat):
-            Progress.speed *= 0.5
-            Progress.startat = Progress.progress
-        area.tag_redraw()
-        return Progress.bps
 
-    @staticmethod
-    def pulse_indefinite(area : bpy.types.Area):
-        if Progress.stop:
-            return None
-        Progress.progress += Progress.speed * Progress.bps
-        if Progress.progress >= Progress.endat or Progress.progress < Progress.startat:
-            Progress.speed = -Progress.speed
-        area.tag_redraw()
-        return Progress.bps
+        match UIUpdate.progress_mode:
+            case UIUpdate.PROGRESS_FINITE:
+                UIUpdate.progress += UIUpdate.speed * UIUpdate.spf
+                if UIUpdate.progress >= UIUpdate.startat + 0.5*(UIUpdate.endat - UIUpdate.startat):
+                    UIUpdate.speed *= 0.5
+                    UIUpdate.startat = UIUpdate.progress
+            case UIUpdate.PROGRESS_INFINITE:
+                UIUpdate.progress += UIUpdate.speed * UIUpdate.spf
+                if UIUpdate.progress >= UIUpdate.endat or UIUpdate.progress < UIUpdate.startat:
+                    UIUpdate.speed = -UIUpdate.speed
+        if UIUpdate.area:
+            UIUpdate.area.tag_redraw()
+        return UIUpdate.spf
 
 
 #######################################################################################################
@@ -266,32 +345,32 @@ def install_prerequisites() -> bool:
         # deprecated as of 2.91: pybin = bpy.app.binary_path_python. Instead use 
         pybin = sys.executable
 
-        Progress.milestone(i/n, 'Installing/Updating pip', 2)
+        UIUpdate.milestone(i/n, 'Installing/Updating pip', 2)
         ensurepip.bootstrap()
         subprocess.check_call([pybin, '-m', 'pip', 'install', '--upgrade', 'pip'])
 
         if not ginder_prerequisites['pygit2']:
             i += 1
-            Progress.milestone(i/n, 'Installing pygit2', 2)
+            UIUpdate.milestone(i/n, 'Installing pygit2', 2)
             subprocess.check_call([pybin, '-m', 'pip', 'install', 'pygit2'])
         if not ginder_prerequisites['github']:
             i += 1
-            Progress.milestone(i/n, 'Installing PyGithub', 2)
+            UIUpdate.milestone(i/n, 'Installing PyGithub', 2)
             subprocess.check_call([pybin, '-m', 'pip', 'install', 'PyGithub'])
         if not ginder_prerequisites['requests_oauthlib']:
             i += 1
-            Progress.milestone(i/n, 'Installing requests-oauthlib', 2)
+            UIUpdate.milestone(i/n, 'Installing requests-oauthlib', 2)
             subprocess.check_call([pybin, '-m', 'pip', 'install', 'requests-oauthlib'])
     except Exception as ex:
         run_in_main_thread(functools.partial(report_error, 'ERROR Installing Ginder Prerequisites', f'Could not pip install one or more modules required by Ginder\n{str(ex)}'))
-        Progress.stop = True
+        UIUpdate.end_progress()
         return False
     check_prerequisites()
     if ginder_prerequisites['pygit2'] and ginder_prerequisites['github'] and ginder_prerequisites['requests_oauthlib']:
         GinderState.state = GinderState.PREREQ_INSTALLED
     else:
         GinderState.state = GinderState.READY_FOR_RESTART
-    Progress.stop = True
+    UIUpdate.end_progress()
     return True
 
 class InstallPrerequisitesOperator(bpy.types.Operator):
@@ -304,7 +383,7 @@ class InstallPrerequisitesOperator(bpy.types.Operator):
             report_error('Ginder installation', 'The AddOn is in an unexpected state')
             return {'CANCELLED'}
 
-        Progress.init(context.area)
+        UIUpdate.progress_init(context.area)
         install_prereq_thread = threading.Thread(target=install_prerequisites)
         install_prereq_thread.start()
         GinderState.state = GinderState.INSTALLING_PREREQ
@@ -324,31 +403,31 @@ def uninstall_prerequisites() -> bool:
         # deprecated as of 2.91: pybin = bpy.app.binary_path_python. Instead use 
         pybin = sys.executable
 
-        Progress.milestone(i/n, 'Uninstalling requests-oauthlib', 2)
+        UIUpdate.milestone(i/n, 'Uninstalling requests-oauthlib', 2)
         subprocess.check_call([pybin, '-m', 'pip', 'uninstall', '-y', 'requests-oauthlib'])
 
         i += 1
-        Progress.milestone(i/n, 'Uninstalling PyGithub', 2)
+        UIUpdate.milestone(i/n, 'Uninstalling PyGithub', 2)
         subprocess.check_call([pybin, '-m', 'pip', 'uninstall', '-y', 'PyGithub'])
 
         i += 1
-        Progress.milestone(i/n, 'Uninstalling pygit2', 2)
+        UIUpdate.milestone(i/n, 'Uninstalling pygit2', 2)
         subprocess.check_call([pybin, '-m', 'pip', 'uninstall', '-y', 'pygit2'])
     except Exception as ex:
         run_in_main_thread(functools.partial(report_error, 'ERROR Uninstalling Ginder Prerequisites', f'Could not pip uninstall one modules\n{str(ex)}'))
-        Progress.stop = True
+        UIUpdate.end_progress()
         return False
     check_prerequisites()
     if not (ginder_prerequisites['pygit2'] and ginder_prerequisites['github'] and ginder_prerequisites['requests_oauthlib']):
         GinderState.state = GinderState.PREREQ_INSTALLED
     else:
         GinderState.state = GinderState.READY_FOR_RESTART
-    Progress.stop = True
+    UIUpdate.end_progress()
     return True
 
 
 class UninstallPrerequisitesOperator(bpy.types.Operator):
-    """Remove python modules installed by this Add-on"""
+    """Remove python modules installed by this Add-on. Click only if you plan to uninstall this Add-on."""
     bl_idname = the_unique_name_of_the_uninstall_prerequisites_button
     bl_label = "Uninstall Prerequisites"
 
@@ -357,7 +436,7 @@ class UninstallPrerequisitesOperator(bpy.types.Operator):
             report_error('Ginder installation', 'The AddOn is in an unexpected state')
             return {'CANCELLED'}
 
-        Progress.init(context.area)
+        UIUpdate.progress_init(context.area)
         install_prereq_thread = threading.Thread(target=uninstall_prerequisites)
         install_prereq_thread.start()
         GinderState.state = GinderState.UNINSTALLING_PREREQ
@@ -440,6 +519,7 @@ def handle_oauth2_callback(port=21214):
     return Oauth2CallbackHandler.code
 
 def do_register_with_github():
+    from requests_oauthlib import OAuth2Session
     # We need to be able to create a new repo on behalf of the user and change its GitHub-Pages settings.
     # Thus we need scope="repo" (including private repos), or scope="public_repo" (public repos only, no access to private repos).
     # For different scopes, see: https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps
@@ -448,16 +528,22 @@ def do_register_with_github():
 
     # Redirect user to GitHub for authorization
     authorization_url, state = oa2.authorization_url(github_authorization_base_url)
+    # Do not put a breakpoint in between the following two calls. Otherwise the OAuth authorization site could send the response before the handler is set-up
     run_in_main_thread(functools.partial(do_url_open, authorization_url))
     resp_code = handle_oauth2_callback()
-    token = oa2.fetch_token(github_token_url, client_secret=ginder_client_secret, code=resp_code)
-    run_in_main_thread(functools.partial(GinderPreferences.set_github_token, token['access_token']))
-    user = oa2.get('https://api.github.com/user')
-    run_in_main_thread(functools.partial(GinderPreferences.set_github_user,  user['name']))
-    Progress.stop = True
-    GinderState.state == GinderState.GITHUB_REGISTERED
+
+    token_dict = oa2.fetch_token(github_token_url, client_secret=ginder_client_secret, code=resp_code)
+    token = token_dict['access_token']
+    run_in_main_thread(functools.partial(GinderPreferences.set_github_token, token))
+
+    check_token(token)
+
+    UIUpdate.end_progress()
+    GinderState.state = GinderState.GITHUB_REGISTERED
+    print(f"GinderState.state: {GinderState.state}")
 
 def do_url_open(url:str):
+    time.sleep(0.5)  # Make sure that url callback is not sent handled before http handler is up and running
     bpy.ops.wm.url_open(url=url)
     
 
@@ -471,7 +557,7 @@ class RegisterWithGitHubOperator(bpy.types.Operator):
             report_error('Ginder Installation', 'The Add-On is in an unexpected state')
             return {'CANCELLED'}
 
-        Progress.init_indefinite(context.area)
+        UIUpdate.progress_init_indefinite(context.area)
         register_with_github_thread = threading.Thread(target=do_register_with_github)
         register_with_github_thread.start()
         GinderState.state = GinderState.REGISTERING_GITHUB
@@ -511,6 +597,33 @@ class OpenGinderPrefsOperator(bpy.types.Operator):
         bpy.data.window_managers["WinMan"].addon_support = {'COMMUNITY'}
         bpy.ops.preferences.addon_show(module=the_unique_name_of_the_addon)
         return {'FINISHED'}
+    
+#######################################################################################################
+#
+#  COPY GitHub REGISTRATION LINK TO CLIPBOARD
+#
+#######################################################################################################
+
+def copy2clip(txt):
+    match platform.system():
+        case "Windows":
+            cmd='echo '+txt.strip()+'|clip'
+        case "Linux":
+            cmd='echo '+txt.strip()+'|xclip'
+        case "Darwin": # (open-sourced base part of macOS)
+            cmd='echo '+txt.strip()+'|pbcopy'
+    return subprocess.check_call(cmd, shell=True)
+
+class CopyRegistrationLinkOperator(bpy.types.Operator):
+    """Copy the GitHub registration link to the clipboard"""
+    bl_idname = the_unique_name_of_the_copy_registration_link_button
+    bl_label = "Copy Registration Link to Clipboard"
+
+    def execute(self, context):
+        copy2clip('http://www.wtf.com')
+        return {'FINISHED'}
+    
+ 
 
 #######################################################################################################
 #
@@ -525,11 +638,11 @@ class GinderPreferences(AddonPreferences):
 
     @staticmethod
     def set_github_token(token:str) -> None:
-        bpy.context.preferences.addons[the_unique_name_of_the_addon].github_token = token
+        bpy.context.preferences.addons[the_unique_name_of_the_addon].preferences.github_token = token
 
     @staticmethod
     def get_github_token() -> str:
-        return bpy.context.preferences.addons[the_unique_name_of_the_addon].github_token
+        return bpy.context.preferences.addons[the_unique_name_of_the_addon].preferences.github_token
 
     github_token: StringProperty(
         name="GitHub Token",
@@ -538,11 +651,11 @@ class GinderPreferences(AddonPreferences):
 
     @staticmethod
     def set_github_user(user:str) -> None:
-        bpy.context.preferences.addons[the_unique_name_of_the_addon].github_user = user
+        bpy.context.preferences.addons[the_unique_name_of_the_addon].preferences.github_user = user
 
     @staticmethod
     def get_github_user() -> str:
-        return bpy.context.preferences.addons[the_unique_name_of_the_addon].github_user
+        return bpy.context.preferences.addons[the_unique_name_of_the_addon].preferences.github_user
 
     github_user: StringProperty(
         name="GitHub User",
@@ -563,34 +676,54 @@ class GinderPreferences(AddonPreferences):
         if GinderState.state == GinderState.UNDEFINED:
             GinderState.init()
             
-        row = layout.row()
-        row.scale_y = 1
-        row.label(text = "Ginder", icon_value = preview_collections["main"]["the_ginder_icon"].icon_id)
-        row.label(text = f'State: {GinderState.state_description()}')
-        row = layout.row()
-        row.scale_y = 1.5
+        UIUpdate.start_pulse(context.area)
 
-        if GinderState.state == GinderState.ADDON_INSTALLED:
-            row.operator(the_unique_name_of_the_install_prerequisites_button, icon="SCRIPT")
+        status_text = f'Connected to GitHub as {GinderPreferences.get_github_user()}' if GinderState.state == GinderState.GITHUB_REGISTERED else GinderState.state_description() 
+        avatar_icon = preview_collections["main"]["the_avatar_icon"].icon_id if "the_avatar_icon" in preview_collections['main'] else preview_collections['main']['the_avatar_unknown_icon'].icon_id
 
-        elif GinderState.state == GinderState.INSTALLING_PREREQ or GinderState.state == GinderState.UNINSTALLING_PREREQ:
-            row.progress(factor=Progress.progress, type = 'BAR', text=Progress.message)
+        # GINDER STATUS
+        box = layout.box()
+        row = box.row()
+        row.scale_y = 2
+        row.template_icon(icon_value = avatar_icon, scale=1)
+        col = row.column()
+        col.scale_y = 0.5
+        # STATUSBOX LINE ONE
+        #col.label(text = status_text)
+        # STATUSBOX LINE TWO
+        #col.operator(the_unique_name_of_the_restart_blender_button, icon='BLENDER')
 
-        elif GinderState.state == GinderState.READY_FOR_RESTART:
-            row.operator(the_unique_name_of_the_restart_blender_button, icon="BLENDER")
-            
-        elif GinderState.state == GinderState.PREREQ_INSTALLED:
-            row.operator(the_unique_name_of_the_register_with_github_button, icon_value = preview_collections["main"]["the_github_icon"].icon_id)
-            row = layout.row()
-            row.scale_y = 1
-            row.operator(the_unique_name_of_the_uninstall_prerequisites_button, icon="SCRIPT")
+        match GinderState.state:
+            case GinderState.ADDON_INSTALLED:
+                col.label(text = status_text)
+                col.operator(the_unique_name_of_the_install_prerequisites_button, icon='SCRIPT')
 
-        elif GinderState.state == GinderState.REGISTERING_GITHUB:
-            row.progress(factor=Progress.progress, type = 'RING', text='')
+            case GinderState.INSTALLING_PREREQ |GinderState.UNINSTALLING_PREREQ:
+                col.label(text = status_text)
+                col.progress(factor=UIUpdate.progress, type = 'BAR', text=UIUpdate.message)
 
-        elif GinderState.state == GinderState.GITHUB_REGISTERED:
-            row.prop(self, "github_user")
-            row.prop(self, "github_token")
+            case GinderState.READY_FOR_RESTART:
+                col.label(text = status_text)
+                col.operator(the_unique_name_of_the_restart_blender_button, icon='BLENDER')
+                
+            case GinderState.PREREQ_INSTALLED:
+                col.label(text = status_text)
+                col.operator(the_unique_name_of_the_register_with_github_button, icon_value = preview_collections['main']['the_github_icon'].icon_id)
+                col.operator(the_unique_name_of_the_uninstall_prerequisites_button, icon='CANCEL')
+
+            case GinderState.REGISTERING_GITHUB:
+                col.progress(factor=UIUpdate.progress, type = 'RING', text=status_text)
+                col.operator(the_unique_name_of_the_copy_registration_link_button, icon='URL')
+
+            case GinderState.GITHUB_REGISTERED:
+                col.label(text = status_text)
+                col.operator(the_unique_name_of_the_deregister_from_github_button, icon='CANCEL')
+
+
+
+        row.template_icon(icon_value = preview_collections['main']['the_ginder_icon_l'].icon_id, scale=1)
+
+
 
 #######################################################################################################
 #
@@ -603,8 +736,10 @@ class GinderMenu(bpy.types.Menu):
     bl_idname = "FILE_MT_ginder_menu"
 
     def draw(self, context):
-        layout = self.layout
+        if GinderState.state == GinderState.UNDEFINED:
+            GinderState.init()
 
+        layout = self.layout
         layout.operator("wm.open_mainfile")
         layout.operator("wm.save_as_mainfile").copy = True
         layout.operator(the_unique_name_of_the_ginder_preferences_button)
@@ -614,8 +749,6 @@ class GinderMenu(bpy.types.Menu):
 
 def draw_ginder_menu(self, context):
     layout = self.layout
-    #pcoll = preview_collections["main"]
-    #ginder_icon = pcoll["the_ginder_icon"]
     layout.menu(GinderMenu.bl_idname, text = 'Ginder - darepo', icon_value = preview_collections["main"]["the_ginder_icon"].icon_id)
 
 
@@ -645,15 +778,17 @@ def register():
     # load a preview thumbnail of a file and store in the previews collection
     pcoll.load("the_github_icon", os.path.join(my_icons_dir, "github_icon.png"), 'IMAGE')
     pcoll.load("the_ginder_icon", os.path.join(my_icons_dir, "ginder_icon_w.png"), 'IMAGE')
+    pcoll.load("the_ginder_icon_l", os.path.join(my_icons_dir, "ginder_icon_g64.png"), 'IMAGE')
+    pcoll.load("the_avatar_unknown_icon", os.path.join(my_icons_dir, "avatar_unknown.png"), 'IMAGE')
 
     preview_collections["main"] = pcoll
-
 
     bpy.utils.register_class(RegisterWithGitHubOperator)
     bpy.utils.register_class(DeregisterFromGitHubOperator)
     bpy.utils.register_class(InstallPrerequisitesOperator)
     bpy.utils.register_class(UninstallPrerequisitesOperator)
     bpy.utils.register_class(RestartBlenderOperator)
+    bpy.utils.register_class(CopyRegistrationLinkOperator)
     bpy.utils.register_class(GinderPreferences)
     bpy.utils.register_class(OpenGinderPrefsOperator)
     bpy.utils.register_class(GinderMenu)
@@ -662,13 +797,14 @@ def register():
     # Check once on startup
     GinderState.init()
 
-
 def unregister():
+    UIUpdate.stop_pulse()
     bpy.types.TOPBAR_MT_file.remove(draw_ginder_menu)
     bpy.utils.unregister_class(GinderMenu)
     bpy.utils.unregister_class(OpenGinderPrefsOperator)
     bpy.utils.unregister_class(GinderPreferences)
     bpy.utils.unregister_class(RestartBlenderOperator)
+    bpy.utils.unregister_class(CopyRegistrationLinkOperator)
     bpy.utils.unregister_class(UninstallPrerequisitesOperator)
     bpy.utils.unregister_class(InstallPrerequisitesOperator)
     bpy.utils.unregister_class(DeregisterFromGitHubOperator)
