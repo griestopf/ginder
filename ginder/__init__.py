@@ -136,6 +136,7 @@ def check_token(token: str):
         auth=github.Auth.Token(token=token)
         g = github.Github(auth=auth)
         user = g.get_user()
+        user_name = user.name
     except:
         GinderState.state = GinderState.PREREQ_INSTALLED
         return
@@ -143,20 +144,21 @@ def check_token(token: str):
     g.close()
 
     # We're still here: notify the main thread
-    run_in_main_thread(functools.partial(GinderPreferences.set_github_user,  user.name))
+    run_in_main_thread(functools.partial(GinderPreferences.set_github_user,  user_name))
     GinderState.state = GinderState.GITHUB_REGISTERED
 
-    # Try to load the user avatar
-    avatar_download_url = urlparse(user.avatar_url)
-    _, avatar_ext = os.path.splitext(avatar_download_url.path)
-    avatar_local_dir = os.path.join(os.path.dirname(__file__), "icons", f"avatar{avatar_ext}")
+    # Try to load the user avatar (if not already loaded during this session)
+    if not 'the_avatar_icon' in preview_collections['main']:
+        avatar_download_url = urlparse(user.avatar_url)
+        _, avatar_ext = os.path.splitext(avatar_download_url.path)
+        avatar_local_dir = os.path.join(os.path.dirname(__file__), "icons", f"avatar{avatar_ext}")
 
-    try:
-        urlretrieve(user.avatar_url, avatar_local_dir)
-        run_in_main_thread(lambda:preview_collections["main"].load("the_avatar_icon", avatar_local_dir, 'IMAGE'))
-    except Exception:
-        run_in_main_thread(lambda:report_error('ERROR', f'Could not load GitHub avatar from: {user.avatar_url}'))
-        pass
+        try:
+            urlretrieve(user.avatar_url, avatar_local_dir)
+            run_in_main_thread(lambda:preview_collections['main'].load('the_avatar_icon', avatar_local_dir, 'IMAGE'))
+        except Exception:
+            run_in_main_thread(lambda:report_error('ERROR', f'Could not load GitHub avatar from: {user.avatar_url}'))
+            pass
 
 #######################################################################################################
 
@@ -180,7 +182,7 @@ class GinderState:
         "Uninstalling python modules", 
         "Blender needs to be restarted", 
         "Ready to register with GitHub",
-        "Finish GitHub registration process in browser",
+        "Finish the Ginder ↔ GitHub registration in your Web browser!",
         "Checking GitHub access",
         "Ready"
         ]
@@ -312,7 +314,7 @@ class UIUpdate:
 
     @staticmethod
     def pulse():
-        if UIUpdate.stopit:
+        if UIUpdate.stopit or (UIUpdate.area and UIUpdate.area.type == 'EMPTY'):
             return None
 
         match UIUpdate.progress_mode:
@@ -325,7 +327,11 @@ class UIUpdate:
                 UIUpdate.progress += UIUpdate.speed * UIUpdate.spf
                 if UIUpdate.progress >= UIUpdate.endat or UIUpdate.progress < UIUpdate.startat:
                     UIUpdate.speed = -UIUpdate.speed
-        if UIUpdate.area:
+        
+        print(f'pulsing every {UIUpdate.spf} second.')
+        
+        if UIUpdate.area and not UIUpdate.area.type == 'EMPTY':
+            # TODO: Make sure the area is still valid
             UIUpdate.area.tag_redraw()
         return UIUpdate.spf
 
@@ -511,9 +517,24 @@ class Oauth2CallbackHandler(BaseHTTPRequestHandler):
             Oauth2CallbackHandler.code = query_parts["code"][0]
         
         self._set_response()
-        self.wfile.write("GET request for {}".format(self.path).encode('utf-8'))
+        # self.wfile.write("GET request for {}".format(self.path).encode('utf-8'))
+        self.wfile.write('''
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8" />
+    <title>title</title>
+</head>
+<body>
+    <h1>Ginder authorized ✅</h1>
+    Congratulations, you successfully registered your installation of <b>Ginder</b>, the GitHub Add-on for Blender. 
+    You can close this tab and proceed back to Blender.
+</body>
+</html>'''
+                         .encode('utf-8'))
 
 def handle_oauth2_callback(port=21214):
+    print('handling oauth2 request')
     with HTTPServer(('', port), Oauth2CallbackHandler) as httpd:
         httpd.handle_request()
     return Oauth2CallbackHandler.code
@@ -542,13 +563,18 @@ def do_register_with_github():
     GinderState.state = GinderState.GITHUB_REGISTERED
     print(f"GinderState.state: {GinderState.state}")
 
+current_url = ''
+
 def do_url_open(url:str):
+    global current_url
+    current_url = url
     time.sleep(0.5)  # Make sure that url callback is not sent handled before http handler is up and running
+    print(f'opening {url}')
     bpy.ops.wm.url_open(url=url)
     
 
 class RegisterWithGitHubOperator(bpy.types.Operator):
-    """Register with your user name at GitHub and allow Ginder (this Add-on) to access your public repositories"""
+    """Opens up your Web browser showing a page where you can register Ginder (this Add-on) with your user account. This will allow Ginder to access your public GitHub repositories"""
     bl_idname = the_unique_name_of_the_register_with_github_button
     bl_label = "Register with GitHub"
 
@@ -569,14 +595,49 @@ class RegisterWithGitHubOperator(bpy.types.Operator):
 #
 #######################################################################################################
 
-class DeregisterFromGitHubOperator(bpy.types.Operator):
-    """De-register Ginder (this Add-on) from your GitHub user account."""
-    bl_idname = the_unique_name_of_the_deregister_from_github_button
-    bl_label = "De-register from GitHub"
+# ENDPOINT SEEMS TO BE DEFUNCT OR MISUNDERSTOOD 
+#def do_deregister_from_github():
+#     # Do this: https://docs.github.com/en/rest/apps/oauth-applications?apiVersion=2022-11-28#delete-an-app-token
+#     #curl -L \
+#     # -X DELETE \
+#     # -H "Accept: application/vnd.github+json" \
+#     # -H "Authorization: Bearer <YOUR-TOKEN>" \
+#     # -H "X-GitHub-Api-Version: 2022-11-28" \
+#     # https://api.github.com/applications/<APP-ID???>/token \
+#     # -d '{"access_token":"<YOUR-TOKEN>???"}'
 
-    def execute(self, context):#
-        ## Do this: https://docs.github.com/en/rest/apps/oauth-applications?apiVersion=2022-11-28#delete-an-app-token
-        report_error('Test', self.bl_label)
+#     if GinderState.state != GinderState.GITHUB_REGISTERED:
+#         return
+    
+#     token = GinderPreferences.get_github_token()
+#     headers = {
+#         "Accept"                :  "application/vnd.github+json",
+#         "Authorization"         : f"Bearer {token}",
+#         "X-GitHub-Api-Version"  :  "2022-11-28"
+#     }
+#     data = {
+#         "access_token"  : token,
+#     }
+#     url = f'https://api.github.com/applications/{ginder_oauth2_client_id}/token'
+#     res = requests.delete(url=url, headers=headers, json=data)
+#     if (200 <= res.status_code and res.status_code < 300):
+#         GinderState.state = GinderState.PREREQ_INSTALLED
+#     else:
+#         report_error('ERROR', 'Could not deregister from GitHub.')
+
+class DeregisterFromGitHubOperator(bpy.types.Operator):
+    """Reset GitHub registration. To finally remove your Ginder registration from GitHub, revoke Ginder access from github.com/settings/applications"""
+    bl_idname = the_unique_name_of_the_deregister_from_github_button
+    bl_label = "Reset GitHub registration"
+
+    def execute(self, context):
+        if GinderState.state != GinderState.GITHUB_REGISTERED:
+            return {'FINISHED'}
+        GinderPreferences.set_github_token('')
+        GinderPreferences.set_github_user('')
+        del preview_collections['main']['the_avatar_icon']
+        GinderState.state = GinderState.PREREQ_INSTALLED
+        do_url_open('https://github.com/settings/applications')
         return {'FINISHED'}
 
 #######################################################################################################
@@ -604,23 +665,32 @@ class OpenGinderPrefsOperator(bpy.types.Operator):
 #
 #######################################################################################################
 
-def copy2clip(txt):
+def copy2clip(txt:str):
     match platform.system():
         case "Windows":
-            cmd='echo '+txt.strip()+'|clip'
+            # escape ampersand with triple caret (https://superuser.com/questions/550048/is-there-an-escape-for-character-in-the-command-prompt)
+            escaped_link = txt.strip().replace('&', '^^^&')
+            cmd='echo '+escaped_link+'|clip'
         case "Linux":
-            cmd='echo '+txt.strip()+'|xclip'
+            # escape ampersand with backslash (https://askubuntu.com/questions/50898/how-to-skip-the-evaluation-of-ampersand-in-command-line)
+            escaped_link = txt.strip().replace('&', '\\&')
+            cmd='echo '+escaped_link+'|xclip'
         case "Darwin": # (open-sourced base part of macOS)
-            cmd='echo '+txt.strip()+'|pbcopy'
+            # escape ampersand with backslash (https://askubuntu.com/questions/50898/how-to-skip-the-evaluation-of-ampersand-in-command-line)
+            escaped_link = txt.strip().replace('&', '\\&')
+            cmd='echo '+escaped_link+'|pbcopy'
     return subprocess.check_call(cmd, shell=True)
 
 class CopyRegistrationLinkOperator(bpy.types.Operator):
-    """Copy the GitHub registration link to the clipboard"""
+    """If your browser does not open the Ginder registration page autmatically, click this button to copy the GitHub registration link to the clipboard. Afterwards, open your browser and paste the copied link"""
     bl_idname = the_unique_name_of_the_copy_registration_link_button
     bl_label = "Copy Registration Link to Clipboard"
 
     def execute(self, context):
-        copy2clip('http://www.wtf.com')
+        if current_url:
+            copy2clip(current_url)
+        else:
+            report_error('ERROR', 'GitHub registration URL not set.')
         return {'FINISHED'}
     
  
@@ -679,7 +749,7 @@ class GinderPreferences(AddonPreferences):
         UIUpdate.start_pulse(context.area)
 
         status_text = f'Connected to GitHub as {GinderPreferences.get_github_user()}' if GinderState.state == GinderState.GITHUB_REGISTERED else GinderState.state_description() 
-        avatar_icon = preview_collections["main"]["the_avatar_icon"].icon_id if "the_avatar_icon" in preview_collections['main'] else preview_collections['main']['the_avatar_unknown_icon'].icon_id
+        avatar_icon = preview_collections['main']['the_avatar_icon'].icon_id if 'the_avatar_icon' in preview_collections['main'] else preview_collections['main']['the_avatar_unknown_icon'].icon_id
 
         # GINDER STATUS
         box = layout.box()
@@ -732,16 +802,16 @@ class GinderPreferences(AddonPreferences):
 #######################################################################################################
 
 class GinderMenu(bpy.types.Menu):
-    bl_label = "Ginder Menu"
-    bl_idname = "FILE_MT_ginder_menu"
+    bl_label = 'Ginder Menu'
+    bl_idname = 'FILE_MT_ginder_menu'
 
     def draw(self, context):
         if GinderState.state == GinderState.UNDEFINED:
             GinderState.init()
 
         layout = self.layout
-        layout.operator("wm.open_mainfile")
-        layout.operator("wm.save_as_mainfile").copy = True
+        layout.operator('wm.open_mainfile')
+        layout.operator('wm.save_as_mainfile').copy = True
         layout.operator(the_unique_name_of_the_ginder_preferences_button)
 
 
@@ -749,7 +819,7 @@ class GinderMenu(bpy.types.Menu):
 
 def draw_ginder_menu(self, context):
     layout = self.layout
-    layout.menu(GinderMenu.bl_idname, text = 'Ginder - darepo', icon_value = preview_collections["main"]["the_ginder_icon"].icon_id)
+    layout.menu(GinderMenu.bl_idname, text = 'Ginder - darepo', icon_value = preview_collections['main']["the_ginder_icon"].icon_id)
 
 
 #######################################################################################################
@@ -760,7 +830,7 @@ def draw_ginder_menu(self, context):
 
 
 # We can store multiple preview collections here,
-# however in this example we only store "main"
+# however in this example we only store 'main'
 preview_collections = {}
 
 # Register and add to the "file selector" menu (required to use F3 search "Text Export Operator" for quick access).
@@ -773,15 +843,15 @@ def register():
 
     # path to the folder where the icon is
     # the path is calculated relative to this py file inside the addon folder
-    my_icons_dir = os.path.join(os.path.dirname(__file__), "icons")
+    my_icons_dir = os.path.join(os.path.dirname(__file__), 'icons')
 
     # load a preview thumbnail of a file and store in the previews collection
-    pcoll.load("the_github_icon", os.path.join(my_icons_dir, "github_icon.png"), 'IMAGE')
-    pcoll.load("the_ginder_icon", os.path.join(my_icons_dir, "ginder_icon_w.png"), 'IMAGE')
-    pcoll.load("the_ginder_icon_l", os.path.join(my_icons_dir, "ginder_icon_g64.png"), 'IMAGE')
-    pcoll.load("the_avatar_unknown_icon", os.path.join(my_icons_dir, "avatar_unknown.png"), 'IMAGE')
+    pcoll.load('the_github_icon', os.path.join(my_icons_dir, 'github_icon.png'), 'IMAGE')
+    pcoll.load('the_ginder_icon', os.path.join(my_icons_dir, 'ginder_icon_w.png'), 'IMAGE')
+    pcoll.load('the_ginder_icon_l', os.path.join(my_icons_dir, 'ginder_icon_g64.png'), 'IMAGE')
+    pcoll.load('the_avatar_unknown_icon', os.path.join(my_icons_dir, 'avatar_unknown.png'), 'IMAGE')
 
-    preview_collections["main"] = pcoll
+    preview_collections['main'] = pcoll
 
     bpy.utils.register_class(RegisterWithGitHubOperator)
     bpy.utils.register_class(DeregisterFromGitHubOperator)
@@ -793,7 +863,8 @@ def register():
     bpy.utils.register_class(OpenGinderPrefsOperator)
     bpy.utils.register_class(GinderMenu)
     bpy.types.TOPBAR_MT_file.prepend(draw_ginder_menu)
-
+    bpy.context.preferences.use_preferences_save = True # see https://blender.stackexchange.com/questions/157677/add-on-preferences-auto-saving-bug
+    
     # Check once on startup
     GinderState.init()
 
