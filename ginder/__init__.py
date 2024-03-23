@@ -217,31 +217,15 @@ class GinderState:
 
 #######################################################################################################
 #
-#   CALL INTO MAIN THREAD MANAGEMENT
+#  UI UPDATE, PROGRESS BAR AND CALL INTO MAIN THREAD MANAGEMENT
 #
 #######################################################################################################
-
-execution_queue = queue.Queue()
 
 # This function can safely be called in another thread.
 # The function will be executed when the timer runs the next time.
 def run_in_main_thread(function):
-    execution_queue.put(function)
+    UIUpdate.execution_queue.put(function)
 
-
-def execute_queued_functions():
-    while not execution_queue.empty():
-        function = execution_queue.get()
-        function()
-    return 1.0
-
-bpy.app.timers.register(execute_queued_functions)
-
-#######################################################################################################
-#
-#  UI UPDATE AND PROGRESS BAR MANAGEMENT
-#
-#######################################################################################################
 
 class UIUpdate:
     REDRAW = 0
@@ -259,14 +243,15 @@ class UIUpdate:
     message:str = ''
     area:bpy.types.Area = None
     stopit:bool = False
+    execution_queue:queue.Queue
 
     @staticmethod
     def start_pulse(area:bpy.types.Area = None, fps:float = 2):
+        UIUpdate.area = area
         if not bpy.app.timers.is_registered(UIUpdate.pulse):
             UIUpdate.spf = 1/fps
             UIUpdate.stopit = False
-            UIUpdate.area = area
-
+            UIUpdate.execution_queue = queue.Queue()
             bpy.app.timers.register(UIUpdate.pulse)
 
     @staticmethod
@@ -283,7 +268,7 @@ class UIUpdate:
         UIUpdate.message = msg
         UIUpdate.area = area
         UIUpdate.progress_mode = UIUpdate.PROGRESS_FINITE
-        UIUpdate.start_pulse()
+        UIUpdate.start_pulse(area)
     
     @staticmethod
     def progress_init_indefinite(area:bpy.types.Area, duration:float = 1, fps:float = 10, msg:str = ''):
@@ -296,7 +281,7 @@ class UIUpdate:
         UIUpdate.speed = (UIUpdate.endat - UIUpdate.startat) / duration
         UIUpdate.area = area
         UIUpdate.progress_mode = UIUpdate.PROGRESS_INFINITE
-        UIUpdate.start_pulse()
+        UIUpdate.start_pulse(area)
 
     @staticmethod
     def end_progress():
@@ -314,7 +299,12 @@ class UIUpdate:
 
     @staticmethod
     def pulse():
-        if UIUpdate.stopit or (UIUpdate.area and UIUpdate.area.type == 'EMPTY'):
+        while not UIUpdate.execution_queue.empty():
+            function = UIUpdate.execution_queue.get()
+            print(f'calling {function.__name__ if hasattr(function, "__name__") else "nameless function"}')
+            function()
+
+        if UIUpdate.stopit: # or (UIUpdate.area and UIUpdate.area.type == 'EMPTY'):
             return None
 
         match UIUpdate.progress_mode:
@@ -328,8 +318,8 @@ class UIUpdate:
                 if UIUpdate.progress >= UIUpdate.endat or UIUpdate.progress < UIUpdate.startat:
                     UIUpdate.speed = -UIUpdate.speed
         
-        print(f'pulsing every {UIUpdate.spf} second.')
-        
+        # print(f'pulsing every {UIUpdate.spf} second.')
+
         if UIUpdate.area and not UIUpdate.area.type == 'EMPTY':
             # TODO: Make sure the area is still valid
             UIUpdate.area.tag_redraw()
@@ -540,35 +530,44 @@ def handle_oauth2_callback(port=21214):
     return Oauth2CallbackHandler.code
 
 def do_register_with_github():
-    from requests_oauthlib import OAuth2Session
-    # We need to be able to create a new repo on behalf of the user and change its GitHub-Pages settings.
-    # Thus we need scope="repo" (including private repos), or scope="public_repo" (public repos only, no access to private repos).
-    # For different scopes, see: https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps
-    # The required scope will be shown to the user on the authorization_url web page asking the users confirmation.
-    oa2 = OAuth2Session(ginder_oauth2_client_id, scope="public_repo")
+    try:
+        print('now in do_register_with_github')
+        from requests_oauthlib import OAuth2Session
+        # We need to be able to create a new repo on behalf of the user and change its GitHub-Pages settings.
+        # Thus we need scope="repo" (including private repos), or scope="public_repo" (public repos only, no access to private repos).
+        # For different scopes, see: https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps
+        # The required scope will be shown to the user on the authorization_url web page asking the users confirmation.
+        oa2 = OAuth2Session(ginder_oauth2_client_id, scope="public_repo")
 
-    # Redirect user to GitHub for authorization
-    authorization_url, state = oa2.authorization_url(github_authorization_base_url)
-    # Do not put a breakpoint in between the following two calls. Otherwise the OAuth authorization site could send the response before the handler is set-up
-    run_in_main_thread(functools.partial(do_url_open, authorization_url))
-    resp_code = handle_oauth2_callback()
+        # Redirect user to GitHub for authorization
+        authorization_url, state = oa2.authorization_url(github_authorization_base_url)
+        # Do not put a breakpoint in between the following two calls. Otherwise the OAuth authorization site could send the response before the handler is set-up
+        print('Right before opening registration url and starting request handler')
+        run_in_main_thread(functools.partial(do_url_open, authorization_url))
+        resp_code = handle_oauth2_callback()
 
-    token_dict = oa2.fetch_token(github_token_url, client_secret=ginder_client_secret, code=resp_code)
-    token = token_dict['access_token']
-    run_in_main_thread(functools.partial(GinderPreferences.set_github_token, token))
+        print('request handled, fetching token')
+        token_dict = oa2.fetch_token(github_token_url, client_secret=ginder_client_secret, code=resp_code)
+        token = token_dict['access_token']
+        run_in_main_thread(functools.partial(GinderPreferences.set_github_token, token))
 
-    check_token(token)
+        print('Checking token')
+        check_token(token)
 
-    UIUpdate.end_progress()
-    GinderState.state = GinderState.GITHUB_REGISTERED
-    print(f"GinderState.state: {GinderState.state}")
+        UIUpdate.end_progress()
+        GinderState.state = GinderState.GITHUB_REGISTERED
+        print(f"GinderState.state: {GinderState.state}")
+    except Exception:
+        print("Error in do_register_with_github")
+        raise
+
 
 current_url = ''
 
 def do_url_open(url:str):
     global current_url
     current_url = url
-    time.sleep(0.5)  # Make sure that url callback is not sent handled before http handler is up and running
+    # time.sleep(0.5)  # Make sure that url callback is not sent handled before http handler is up and running
     print(f'opening {url}')
     bpy.ops.wm.url_open(url=url)
     
@@ -579,14 +578,17 @@ class RegisterWithGitHubOperator(bpy.types.Operator):
     bl_label = "Register with GitHub"
 
     def execute(self, context):
+        print('executing RegisterWithGitHubOperator')
         if GinderState.state != GinderState.PREREQ_INSTALLED:
             report_error('Ginder Installation', 'The Add-On is in an unexpected state')
             return {'CANCELLED'}
 
+        print('Starting prog anim, do_register')
         UIUpdate.progress_init_indefinite(context.area)
         register_with_github_thread = threading.Thread(target=do_register_with_github)
         register_with_github_thread.start()
         GinderState.state = GinderState.REGISTERING_GITHUB
+        print('returning from execute')
         return {'FINISHED'}
 
 #######################################################################################################
@@ -742,11 +744,11 @@ class GinderPreferences(AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
+        UIUpdate.start_pulse(context.area)
 
         if GinderState.state == GinderState.UNDEFINED:
             GinderState.init()
             
-        UIUpdate.start_pulse(context.area)
 
         status_text = f'Connected to GitHub as {GinderPreferences.get_github_user()}' if GinderState.state == GinderState.GITHUB_REGISTERED else GinderState.state_description() 
         avatar_icon = preview_collections['main']['the_avatar_icon'].icon_id if 'the_avatar_icon' in preview_collections['main'] else preview_collections['main']['the_avatar_unknown_icon'].icon_id
@@ -806,6 +808,8 @@ class GinderMenu(bpy.types.Menu):
     bl_idname = 'FILE_MT_ginder_menu'
 
     def draw(self, context):
+        UIUpdate.start_pulse(context.area)
+
         if GinderState.state == GinderState.UNDEFINED:
             GinderState.init()
 
@@ -866,6 +870,7 @@ def register():
     bpy.context.preferences.use_preferences_save = True # see https://blender.stackexchange.com/questions/157677/add-on-preferences-auto-saving-bug
     
     # Check once on startup
+    UIUpdate.start_pulse()
     GinderState.init()
 
 def unregister():
