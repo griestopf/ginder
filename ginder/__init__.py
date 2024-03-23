@@ -301,7 +301,7 @@ class UIUpdate:
     def pulse():
         while not UIUpdate.execution_queue.empty():
             function = UIUpdate.execution_queue.get()
-            print(f'calling {function.__name__ if hasattr(function, "__name__") else "nameless function"}')
+            # print(f'calling {function.__name__ if hasattr(function, "__name__") else "nameless function"}')
             function()
 
         if UIUpdate.stopit: # or (UIUpdate.area and UIUpdate.area.type == 'EMPTY'):
@@ -515,23 +515,23 @@ class Oauth2CallbackHandler(BaseHTTPRequestHandler):
     <meta charset="UTF-8" />
     <title>title</title>
 </head>
-<body>
+<body style="font-family: 'Tahoma',sans-serif; margin-left: 5%; margin-right:5%" >
     <h1>Ginder authorized ✅</h1>
-    Congratulations, you successfully registered your installation of <b>Ginder</b>, the GitHub Add-on for Blender. 
-    You can close this tab and proceed back to Blender.
+    <p>Congratulations, you successfully registered your installation of <b>Ginder</b>, the GitHub Add-on for Blender.</p>
+    <p>You can close this tab and proceed back to Blender.</p>
 </body>
 </html>'''
                          .encode('utf-8'))
 
 def handle_oauth2_callback(port=21214):
-    print('handling oauth2 request')
+    # print('handling oauth2 request')
     with HTTPServer(('', port), Oauth2CallbackHandler) as httpd:
         httpd.handle_request()
     return Oauth2CallbackHandler.code
 
 def do_register_with_github():
     try:
-        print('now in do_register_with_github')
+        # print('now in do_register_with_github')
         from requests_oauthlib import OAuth2Session
         # We need to be able to create a new repo on behalf of the user and change its GitHub-Pages settings.
         # Thus we need scope="repo" (including private repos), or scope="public_repo" (public repos only, no access to private repos).
@@ -542,23 +542,23 @@ def do_register_with_github():
         # Redirect user to GitHub for authorization
         authorization_url, state = oa2.authorization_url(github_authorization_base_url)
         # Do not put a breakpoint in between the following two calls. Otherwise the OAuth authorization site could send the response before the handler is set-up
-        print('Right before opening registration url and starting request handler')
+        # print('Right before opening registration url and starting request handler')
         run_in_main_thread(functools.partial(do_url_open, authorization_url))
         resp_code = handle_oauth2_callback()
 
-        print('request handled, fetching token')
+        # print('request handled, fetching token')
         token_dict = oa2.fetch_token(github_token_url, client_secret=ginder_client_secret, code=resp_code)
         token = token_dict['access_token']
         run_in_main_thread(functools.partial(GinderPreferences.set_github_token, token))
 
-        print('Checking token')
+        # print('Checking token')
         check_token(token)
 
         UIUpdate.end_progress()
         GinderState.state = GinderState.GITHUB_REGISTERED
-        print(f"GinderState.state: {GinderState.state}")
-    except Exception:
-        print("Error in do_register_with_github")
+        # print(f"GinderState.state: {GinderState.state}")
+    except Exception as ex:
+        run_in_main_thread(functools.partial(report_error, 'ERROR', f'Exception in do_register_with_github: {str(ex)}'))
         raise
 
 
@@ -567,8 +567,6 @@ current_url = ''
 def do_url_open(url:str):
     global current_url
     current_url = url
-    # time.sleep(0.5)  # Make sure that url callback is not sent handled before http handler is up and running
-    print(f'opening {url}')
     bpy.ops.wm.url_open(url=url)
     
 
@@ -578,17 +576,17 @@ class RegisterWithGitHubOperator(bpy.types.Operator):
     bl_label = "Register with GitHub"
 
     def execute(self, context):
-        print('executing RegisterWithGitHubOperator')
+        # print('executing RegisterWithGitHubOperator')
         if GinderState.state != GinderState.PREREQ_INSTALLED:
             report_error('Ginder Installation', 'The Add-On is in an unexpected state')
             return {'CANCELLED'}
 
-        print('Starting prog anim, do_register')
+        # print('Starting prog anim, do_register')
         UIUpdate.progress_init_indefinite(context.area)
         register_with_github_thread = threading.Thread(target=do_register_with_github)
         register_with_github_thread.start()
         GinderState.state = GinderState.REGISTERING_GITHUB
-        print('returning from execute')
+        # print('returning from execute')
         return {'FINISHED'}
 
 #######################################################################################################
@@ -791,7 +789,8 @@ class GinderPreferences(AddonPreferences):
                 col.label(text = status_text)
                 col.operator(the_unique_name_of_the_deregister_from_github_button, icon='CANCEL')
 
-
+            case _:
+                col.label(text = 'Undefined State. Try to disable/enable or to remove/re-install Ginder')
 
         row.template_icon(icon_value = preview_collections['main']['the_ginder_icon_l'].icon_id, scale=1)
 
