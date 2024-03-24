@@ -59,6 +59,7 @@ the_unique_name_of_the_uninstall_prerequisites_button = "ginder.uninstall_prereq
 the_unique_name_of_the_restart_blender_button = "ginder.restart_blender"
 the_unique_name_of_the_ginder_preferences_button = "ginder.preferences"
 the_unique_name_of_the_copy_registration_link_button = "ginder.copy_registration_link"
+the_unique_name_of_the_ginder_open_users_github_page_button = "ginder.open_users_github_page"
 
 #######################################################################################################
 #
@@ -144,7 +145,7 @@ def check_token(token: str):
     g.close()
 
     # We're still here: notify the main thread
-    run_in_main_thread(functools.partial(GinderPreferences.set_github_user,  user_name))
+    run_in_main_thread(functools.partial(GinderState.set_user,  user))
     GinderState.state = GinderState.GITHUB_REGISTERED
 
     # Try to load the user avatar (if not already loaded during this session)
@@ -175,6 +176,7 @@ class GinderState:
     LAST_STATE = 8
 
     state = UNDEFINED
+    github_user = None
 
     state_descriptions = [
         "Necessary python modules not installed", 
@@ -213,6 +215,26 @@ class GinderState:
         check_token_thread = threading.Thread(target=functools.partial(check_token, token))
         check_token_thread.start()
         return GinderState.state
+
+    @staticmethod
+    def get_user_name():
+        if not GinderState.state == GinderState.GITHUB_REGISTERED:
+            raise Exception(f'Cannot access GitHub user settings due to unexpected GinderState. Expected GITHUB_REGISTERED, is {str(GinderState.state)}.')
+
+        ret = ''
+        if GinderState.github_user:
+            login = GinderState.github_user.login
+            user_name = GinderState.github_user.name
+            if user_name and login:
+                ret = f'{user_name} ({login})'
+            elif login:
+                ret = login
+        return ret
+
+    @staticmethod
+    def set_user(user):
+        GinderState.github_user = user
+
 
 
 #######################################################################################################
@@ -513,12 +535,12 @@ class Oauth2CallbackHandler(BaseHTTPRequestHandler):
 <html>
 <head>
     <meta charset="UTF-8" />
-    <title>title</title>
+    <title>Ginder authorized ✅</title>
 </head>
-<body style="font-family: 'Tahoma',sans-serif; margin-left: 5%; margin-right:5%" >
+<body style="font-family: 'Tahoma',sans-serif; margin-top: 5%; margin-left: 5%; margin-right: 5%" >
     <h1>Ginder authorized ✅</h1>
     <p>Congratulations, you successfully registered your installation of <b>Ginder</b>, the GitHub Add-on for Blender.</p>
-    <p>You can close this tab and proceed back to Blender.</p>
+    <p>You can close this tab and continue in Blender.</p>
 </body>
 </html>'''
                          .encode('utf-8'))
@@ -631,13 +653,14 @@ class DeregisterFromGitHubOperator(bpy.types.Operator):
     bl_label = "Reset GitHub registration"
 
     def execute(self, context):
+        global preview_collections
         if GinderState.state != GinderState.GITHUB_REGISTERED:
             return {'FINISHED'}
         GinderPreferences.set_github_token('')
-        GinderPreferences.set_github_user('')
+        # GinderPreferences.set_github_user('')
         del preview_collections['main']['the_avatar_icon']
         GinderState.state = GinderState.PREREQ_INSTALLED
-        do_url_open('https://github.com/settings/applications')
+        do_url_open(f'https://github.com/settings/connections/applications/{ginder_oauth2_client_id}')
         return {'FINISHED'}
 
 #######################################################################################################
@@ -719,18 +742,18 @@ class GinderPreferences(AddonPreferences):
         description="GitHub Access token registered by the user with the Ginder Add-on.",
     ) # type: ignore
 
-    @staticmethod
-    def set_github_user(user:str) -> None:
-        bpy.context.preferences.addons[the_unique_name_of_the_addon].preferences.github_user = user
+    # @staticmethod
+    # def set_github_user(user:str) -> None:
+    #     bpy.context.preferences.addons[the_unique_name_of_the_addon].preferences.github_user = user
 
-    @staticmethod
-    def get_github_user() -> str:
-        return bpy.context.preferences.addons[the_unique_name_of_the_addon].preferences.github_user
+    # @staticmethod
+    # def get_github_user() -> str:
+    #     return bpy.context.preferences.addons[the_unique_name_of_the_addon].preferences.github_user
 
-    github_user: StringProperty(
-        name="GitHub User",
-        description="GitHub user registered with the Ginder Add-on.",
-    ) # type: ignore
+    # github_user: StringProperty(
+    #     name="GitHub User",
+    #     description="GitHub user registered with the Ginder Add-on.",
+    # ) # type: ignore
     number: IntProperty(
         name="Example Number",
         default=4,
@@ -748,7 +771,7 @@ class GinderPreferences(AddonPreferences):
             GinderState.init()
             
 
-        status_text = f'Connected to GitHub as {GinderPreferences.get_github_user()}' if GinderState.state == GinderState.GITHUB_REGISTERED else GinderState.state_description() 
+        status_text = f'Connected to GitHub as {GinderState.get_user_name()}' if GinderState.state == GinderState.GITHUB_REGISTERED else GinderState.state_description() 
         avatar_icon = preview_collections['main']['the_avatar_icon'].icon_id if 'the_avatar_icon' in preview_collections['main'] else preview_collections['main']['the_avatar_unknown_icon'].icon_id
 
         # GINDER STATUS
@@ -795,6 +818,56 @@ class GinderPreferences(AddonPreferences):
         row.template_icon(icon_value = preview_collections['main']['the_ginder_icon_l'].icon_id, scale=1)
 
 
+#######################################################################################################
+#
+#  REPOSITORY ACTIONS
+#
+#######################################################################################################
+
+#######################################################################################################
+#
+#  OPEN User's GitHub Account
+#
+#######################################################################################################
+
+
+# def get_github_user():
+#     if not GinderState.state == GinderState.GITHUB_REGISTERED:
+#         report_error('ERROR', 'Ginder not registered with GitHub. Could not open user\'s GitHub page.')
+#         raise Exception('get_github_user() called with state not set to GITHUB_REGISTERED')
+    
+#     try:
+#         import github
+#         auth=github.Auth.Token(GinderPreferences.get_github_token())
+#         g = github.Github(auth=auth)
+#         user = g.get_user()
+#         g.close()
+#         return user
+    
+#     except:
+#         GinderState.state = GinderState.PREREQ_INSTALLED
+#         raise
+
+
+class OpenUsersGitHubPageOperator(bpy.types.Operator):
+    """Open the current GitHub user's Page"""
+    bl_idname = the_unique_name_of_the_ginder_open_users_github_page_button
+    bl_label = "Open GitHub user page"
+
+    def execute(self, context):
+        # Try to connnect to GitHub using the token passed to us
+        if not GinderState.state == GinderState.GITHUB_REGISTERED:
+            report_error('ERROR', 'Ginder not registered with GitHub. Could not open user\'s GitHub page.')
+            return {'CANCELLED'}
+
+        try:
+            user = GinderState.github_user
+            do_url_open(user.html_url)
+            return {'FINISHED'}
+        except:
+            report_error('ERROR', 'Could not log-on to GitHub.')
+            return {'CANCELLED'}
+
 
 #######################################################################################################
 #
@@ -812,9 +885,13 @@ class GinderMenu(bpy.types.Menu):
         if GinderState.state == GinderState.UNDEFINED:
             GinderState.init()
 
+        # if GinderState.state == GinderState.GITHUB_REGISTERED:
         layout = self.layout
-        layout.operator('wm.open_mainfile')
-        layout.operator('wm.save_as_mainfile').copy = True
+
+        # layout.operator('wm.open_mainfile')
+        # layout.operator('wm.save_as_mainfile').copy = True
+        if GinderState.state == GinderState.GITHUB_REGISTERED:
+            layout.operator(the_unique_name_of_the_ginder_open_users_github_page_button, icon='URL')
         layout.operator(the_unique_name_of_the_ginder_preferences_button)
 
 
@@ -864,6 +941,7 @@ def register():
     bpy.utils.register_class(CopyRegistrationLinkOperator)
     bpy.utils.register_class(GinderPreferences)
     bpy.utils.register_class(OpenGinderPrefsOperator)
+    bpy.utils.register_class(OpenUsersGitHubPageOperator)
     bpy.utils.register_class(GinderMenu)
     bpy.types.TOPBAR_MT_file.prepend(draw_ginder_menu)
     bpy.context.preferences.use_preferences_save = True # see https://blender.stackexchange.com/questions/157677/add-on-preferences-auto-saving-bug
@@ -876,6 +954,7 @@ def unregister():
     UIUpdate.stop_pulse()
     bpy.types.TOPBAR_MT_file.remove(draw_ginder_menu)
     bpy.utils.unregister_class(GinderMenu)
+    bpy.utils.unregister_class(OpenUsersGitHubPageOperator)
     bpy.utils.unregister_class(OpenGinderPrefsOperator)
     bpy.utils.unregister_class(GinderPreferences)
     bpy.utils.unregister_class(RestartBlenderOperator)
