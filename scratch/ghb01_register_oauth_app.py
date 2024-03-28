@@ -94,7 +94,7 @@ f.close()
 # Test: Fetch a protected resource, i.e. user profile
 user = oa2.get('https://api.github.com/user')
 
-bytes = r.content.decode().replace("'", '"')
+bytes = user.content.decode().replace("'", '"')
 json_content = json.loads(bytes)
 print(json.dumps(json_content, indent=2))
 

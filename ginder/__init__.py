@@ -15,6 +15,7 @@ import json
 from urllib.parse import urlparse
 from urllib.request import urlretrieve
 import bpy
+from bpy.app.handlers import persistent
 import os
 import sys
 import queue
@@ -60,6 +61,7 @@ the_unique_name_of_the_restart_blender_button = "ginder.restart_blender"
 the_unique_name_of_the_ginder_preferences_button = "ginder.preferences"
 the_unique_name_of_the_copy_registration_link_button = "ginder.copy_registration_link"
 the_unique_name_of_the_ginder_open_users_github_page_button = "ginder.open_users_github_page"
+the_unique_name_of_the_create_new_presentation_repo_button = "ginder.create_new_presentation_repo"
 
 #######################################################################################################
 #
@@ -145,7 +147,7 @@ def check_token(token: str):
     g.close()
 
     # We're still here: notify the main thread
-    run_in_main_thread(functools.partial(GinderState.set_user,  user))
+    run_in_main_thread(functools.partial(GinderGit.set_user,  user))
     GinderState.state = GinderState.GITHUB_REGISTERED
 
     # Try to load the user avatar (if not already loaded during this session)
@@ -176,7 +178,6 @@ class GinderState:
     LAST_STATE = 8
 
     state = UNDEFINED
-    github_user = None
 
     state_descriptions = [
         "Necessary python modules not installed", 
@@ -222,9 +223,9 @@ class GinderState:
             raise Exception(f'Cannot access GitHub user settings due to unexpected GinderState. Expected GITHUB_REGISTERED, is {str(GinderState.state)}.')
 
         ret = ''
-        if GinderState.github_user:
-            login = GinderState.github_user.login
-            user_name = GinderState.github_user.name
+        if GinderGit.github_user:
+            login = GinderGit.github_user.login
+            user_name = GinderGit.github_user.name
             if user_name and login:
                 ret = f'{user_name} ({login})'
             elif login:
@@ -232,8 +233,140 @@ class GinderState:
         return ret
 
     @staticmethod
+    def get_login_name():
+        if not GinderState.state == GinderState.GITHUB_REGISTERED:
+            raise Exception(f'Cannot access GitHub user settings due to unexpected GinderState. Expected GITHUB_REGISTERED, is {str(GinderState.state)}.')
+
+        ret = ''
+        if GinderGit.github_user:
+            ret = GinderGit.github_user.login
+        return ret
+
+    @staticmethod
+    def pygit2_present():
+        return GinderState.state == GinderState.GITHUB_REGISTERED or GinderState.state == GinderState.PREREQ_INSTALLED
+
+    @staticmethod
+    @persistent
+    def post_load_handler(blendfile):
+        GinderGit.check_for_repo(blendfile)
+
+    @staticmethod
+    def install_post_load_handler():
+        # Perform 
+        #  ´´´bpy.app.handlers.load_post.append(GinderState.post_load_handler)´´´
+        # once and only once
+        fn_list = bpy.app.handlers.load_post
+        fn = GinderState.post_load_handler
+        fn_name = fn.__name__
+        fn_module = fn.__module__
+        for i in range(len(fn_list) - 1, -1, -1):
+            if fn_list[i].__name__ == fn_name and fn_list[i].__module__ == fn_module:
+                del fn_list[i]
+        fn_list.append(fn)
+
+
+#######################################################################################################
+#
+#  Git & GitHub actions
+#
+#######################################################################################################
+
+class GinderGit:
+    active_repo:bool = False
+    repo_dir:str = None
+    github_user = None
+    github_repo = None
+    local_repo = None
+
+    @staticmethod
     def set_user(user):
-        GinderState.github_user = user
+        GinderGit.github_user = user
+
+    @staticmethod
+    def repo_present():
+        return GinderGit.repo_dir != None
+
+    @staticmethod
+    def check_for_repo(filepath):
+        if not filepath:
+            return
+        if not GinderState.pygit2_present():
+            return
+        import pygit2
+        curdir = os.path.dirname(filepath)
+        GinderGit.repodir = pygit2.discover_repository(curdir)
+
+    @staticmethod
+    def sync_repo():
+        if not GinderState.pygit2_present():
+            report_error('ERROR', 'sync_repo() called without prerequisites installed.')
+            return
+        if not GinderGit.repo_present():
+            return
+        
+    @staticmethod
+    def create_new_repo(repo_name:str, template:str):
+        if not GinderGit.github_user:
+            report_error('ERROR', 'create_new_repo() called without registered user')
+            return
+        from github import Github
+        from github import Auth
+        auth=Auth.Token(GinderPreferences.get_github_token())
+        g = Github(auth=auth)
+        template_repo = g.get_repo(template)
+
+        GinderGit.github_repo = GinderGit.github_user.create_repo_from_template(repo_name, template_repo, description='For debugging purposes only', include_all_branches=False, private=False)
+
+
+        
+    @staticmethod
+    def enable_github_pages():
+        if not GinderGit.github_user:
+            report_error('ERROR', 'create_new_repo() called without registered user')
+            return
+        if not GinderGit.github_repo:
+            report_error('ERROR', 'enable_github_pages() called without current github repo')
+            return
+
+        headers = {
+            "Accept"                :  "application/vnd.github+json",
+            "Authorization"         : f"Bearer {GinderPreferences.get_github_token()}",
+            "X-GitHub-Api-Version"  :  "2022-11-28"
+        }
+        data = {
+            "build_type"  : "workflow",
+            "source"      : {
+                "branch" :"main",
+                "path":"/docs"
+            }    
+        }
+        url = f'https://api.github.com/repos/{GinderGit.github_user.login}/{GinderGit.github_repo.name}/pages'
+        
+        # PyGithub seems to lack this API, so we need to CURL it by hand
+        #curl -L -X POST -H "Accept: application/vnd.github+json" -H "Authorization: Bearer <TOKEN>" -H "X-GitHub-Api-Version: 2022-11-28" https://api.github.com/repos/griestopf/FromFreeDeeTest/pages -d '{"build_type":"workflow", "source":{"branch":"main","path":"/docs"}}'
+        res = requests.post(url=url, headers=headers, json=data)
+        print(res.json)
+        
+
+    @staticmethod
+    def clone_repo(local_dir):
+        if not GinderGit.github_user:
+            report_error('ERROR', 'create_new_repo() called without registered user')
+            return
+        if not GinderGit.github_repo:
+            report_error('ERROR', 'enable_github_pages() called without current github repo')
+            return
+
+        import pygit2
+        credentials = pygit2.UserPass(GinderPreferences.get_github_token(),'x-oauth-basic')
+
+        # class MyRemoteCallbacks(pygit2.RemoteCallbacks):
+        #     def transfer_progress(self, stats):
+        #         print(f'{stats.indexed_objects}/{stats.total_objects}')
+        # callbacks=MyRemoteCallbacks(credentials=credentials)
+        callbacks=pygit2.RemoteCallbacks(credentials=credentials)
+        GinderGit.local_repo = pygit2.clone_repository(GinderGit.github_repo.clone_url, local_dir, callbacks=callbacks)
 
 
 
@@ -540,7 +673,7 @@ class Oauth2CallbackHandler(BaseHTTPRequestHandler):
 <body style="font-family: 'Tahoma',sans-serif; margin-top: 5%; margin-left: 5%; margin-right: 5%" >
     <h1>Ginder authorized ✅</h1>
     <p>Congratulations, you successfully registered your installation of <b>Ginder</b>, the GitHub Add-on for Blender.</p>
-    <p>You can close this tab and continue in Blender.</p>
+    <p>You can close this browser tab and continue in Blender.</p>
 </body>
 </html>'''
                          .encode('utf-8'))
@@ -797,7 +930,7 @@ class GinderPreferences(AddonPreferences):
 
             case GinderState.READY_FOR_RESTART:
                 col.label(text = status_text)
-                col.operator(the_unique_name_of_the_restart_blender_button, icon='BLENDER')
+                col.operator(the_unique_name_of_the_restart_blender_button, icon='QUIT')
                 
             case GinderState.PREREQ_INSTALLED:
                 col.label(text = status_text)
@@ -819,10 +952,93 @@ class GinderPreferences(AddonPreferences):
 
 
 #######################################################################################################
+#######################################################################################################
 #
 #  REPOSITORY ACTIONS
 #
 #######################################################################################################
+#######################################################################################################
+
+#######################################################################################################
+#
+#  CREATE NEW PRESENTATION REPO
+#
+#######################################################################################################
+
+
+
+
+# inspired by https://blender.stackexchange.com/questions/14738/use-filemanager-to-select-directory-instead-of-file
+class CreateNewPresentationRepo(bpy.types.Operator):
+    """Create a new presentation repo at your GitHub account and clone it to a selected directory on your local storage"""
+    bl_idname = the_unique_name_of_the_create_new_presentation_repo_button
+    bl_label = "Create New Repo"
+    bl_options = {'REGISTER'}
+
+    # Define this to tell 'fileselect_add' that we want a directoy
+    directory: StringProperty(
+        name="Local Repository Path",
+        description="Local directory where the new presentation repository will be created."
+        # subtype='DIR_PATH' is not needed to specify the selection mode.
+        # But this will be anyway a directory path.
+        )  # type: ignore
+
+    # Filters folders
+    filter_folder: BoolProperty(
+        default=True,
+        options={"HIDDEN"}
+        ) # type: ignore
+
+
+    template_repo: EnumProperty(
+        items = [
+            ('0', 'FreeDee', 'The standard blender presentaition repository', 0),
+            ('1', 'Other Repo', 'This one doesn\'t exist', 1)
+        ],
+        name="Template",
+        description="The template to use for the newly created repository"
+    ) # type: ignore
+
+    # test: StringProperty(name="Worscht", description="Grobe oder feine?") # type:ignore
+
+    @classmethod
+    def poll(cls, context):
+        return GinderState.state == GinderState.GITHUB_REGISTERED
+
+    def execute(self, context):
+        # print("Selected repo dir: '" + self.directory + "'")
+        if not self.directory:
+            report_error('ERROR', f'No directory specified.')
+            return {'CANCELLED'}
+        if not os.path.isdir(self.directory):
+            report_error('ERROR', f'"{str(self.directory)}" is not a directory.')
+            return {'CANCELLED'}
+        if len(os.listdir(self.directory)) > 0:
+            report_error('ERROR', f'"{str(self.directory)}" ist not empty.')
+            return {'CANCELLED'}
+
+        repo_name = os.path.basename(os.path.normpath(self.directory))
+        template = ['griestopf/FreeDee', 'DEBUG'][int(self.template_repo)]
+        GinderGit.create_new_repo(repo_name, template)
+        GinderGit.enable_github_pages()
+        GinderGit.clone_repo(self.directory)
+
+        return {'FINISHED'}
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text='Select an empty directory')
+        layout.label(text='or create one!')
+        layout.prop(self, 'template_repo')
+
+    def invoke(self, context, event):
+        # Open browser, take reference to 'self' read the path to selected
+        # file, put path in predetermined self fields.
+        # See: https://docs.blender.org/api/current/bpy.types.WindowManager.html#bpy.types.WindowManager.fileselect_add
+        context.window_manager.fileselect_add(self)
+
+        # Tells Blender to hang on for the slow user input
+        return {'RUNNING_MODAL'}
 
 #######################################################################################################
 #
@@ -850,9 +1066,14 @@ class GinderPreferences(AddonPreferences):
 
 
 class OpenUsersGitHubPageOperator(bpy.types.Operator):
-    """Open the current GitHub user's Page"""
+    """Open the current user's GitHub Page"""
     bl_idname = the_unique_name_of_the_ginder_open_users_github_page_button
     bl_label = "Open GitHub user page"
+
+
+    @classmethod
+    def poll(cls, context):
+        return GinderState.state == GinderState.GITHUB_REGISTERED
 
     def execute(self, context):
         # Try to connnect to GitHub using the token passed to us
@@ -861,7 +1082,7 @@ class OpenUsersGitHubPageOperator(bpy.types.Operator):
             return {'CANCELLED'}
 
         try:
-            user = GinderState.github_user
+            user = GinderGit.github_user
             do_url_open(user.html_url)
             return {'FINISHED'}
         except:
@@ -891,8 +1112,13 @@ class GinderMenu(bpy.types.Menu):
         # layout.operator('wm.open_mainfile')
         # layout.operator('wm.save_as_mainfile').copy = True
         if GinderState.state == GinderState.GITHUB_REGISTERED:
+            layout.operator(the_unique_name_of_the_ginder_open_users_github_page_button, text=f'Open {GinderState.get_login_name()}\'s GitHub page', icon='URL')
+        else:
             layout.operator(the_unique_name_of_the_ginder_open_users_github_page_button, icon='URL')
-        layout.operator(the_unique_name_of_the_ginder_preferences_button)
+
+        layout.operator(the_unique_name_of_the_create_new_presentation_repo_button, icon = 'NEWFOLDER')
+
+        layout.operator(the_unique_name_of_the_ginder_preferences_button, icon='PREFERENCES')
 
 
 #######################################################################################################
@@ -942,10 +1168,12 @@ def register():
     bpy.utils.register_class(GinderPreferences)
     bpy.utils.register_class(OpenGinderPrefsOperator)
     bpy.utils.register_class(OpenUsersGitHubPageOperator)
+    bpy.utils.register_class(CreateNewPresentationRepo)
     bpy.utils.register_class(GinderMenu)
     bpy.types.TOPBAR_MT_file.prepend(draw_ginder_menu)
     bpy.context.preferences.use_preferences_save = True # see https://blender.stackexchange.com/questions/157677/add-on-preferences-auto-saving-bug
-    
+    GinderState.install_post_load_handler()
+
     # Check once on startup
     UIUpdate.start_pulse()
     GinderState.init()
@@ -954,6 +1182,7 @@ def unregister():
     UIUpdate.stop_pulse()
     bpy.types.TOPBAR_MT_file.remove(draw_ginder_menu)
     bpy.utils.unregister_class(GinderMenu)
+    bpy.utils.unregister_class(CreateNewPresentationRepo)
     bpy.utils.unregister_class(OpenUsersGitHubPageOperator)
     bpy.utils.unregister_class(OpenGinderPrefsOperator)
     bpy.utils.unregister_class(GinderPreferences)
