@@ -50,19 +50,21 @@ bl_info = {
     "category": "Scene",
 }
 
-the_unique_name_of_the_addon   = "ginder"
+id_for_addon   = "ginder"
 the_readable_name_of_the_addon = "Ginder - GitHub for Blender"
 
-the_unique_name_of_the_register_with_github_button = "ginder.register_with_github"
-the_unique_name_of_the_deregister_from_github_button = "ginder.deregister_with_github"
-the_unique_name_of_the_install_prerequisites_button = "ginder.install_prerequisites"
-the_unique_name_of_the_uninstall_prerequisites_button = "ginder.uninstall_prerequisites"
-the_unique_name_of_the_restart_blender_button = "ginder.restart_blender"
-the_unique_name_of_the_ginder_preferences_button = "ginder.preferences"
-the_unique_name_of_the_copy_registration_link_button = "ginder.copy_registration_link"
-the_unique_name_of_the_ginder_open_users_github_page_button = "ginder.open_users_github_page"
-the_unique_name_of_the_create_new_presentation_repo_button = "ginder.create_new_presentation_repo"
-the_unique_name_of_the_ginder_open_repos_github_page_button = "ginder.open_repos_github_page"
+id_for_register_with_github_operator = "ginder.register_with_github"
+id_for_deregister_from_github_operator = "ginder.deregister_with_github"
+id_for_install_prerequisites_operator = "ginder.install_prerequisites"
+id_for_uninstall_prerequisites_operator = "ginder.uninstall_prerequisites"
+id_for_restart_blender_operator = "ginder.restart_blender"
+id_for_ginder_preferences_operator = "ginder.preferences"
+id_for_copy_registration_link_operator = "ginder.copy_registration_link"
+id_for_ginder_open_users_github_page_operator = "ginder.open_users_github_page"
+id_for_create_new_presentation_repo_operator = "ginder.create_new_presentation_repo"
+id_for_ginder_open_repos_github_page_operator = "ginder.open_repos_github_page"
+id_for_commit_to_repo_operator = "ginder.commit_to_repo"
+id_for_sync_with_remote_operator = "ginder.sync_with_remote"
 
 
 
@@ -281,6 +283,7 @@ class GinderGit:
     github_repo = None # This is the remote presentation repo (origin) as a PyGithub-typedobject
     remote_repo = None # This is the remote presentation repo (origin) as a pygit2-typed object (https://www.pygit2.org/remotes.html#pygit2.Remote)
     local_repo = None  # This is the local presentation repo (clone of origin) as a pygit2-typed object
+    local_reponame: str = None    # probably the same as remote_reponame (if any)
     remote_username: str = None   # Probably the same as github_user.login but not necessarily
     remote_reponame: str = None 
     githubpages_url: str = None
@@ -291,21 +294,34 @@ class GinderGit:
 
     @staticmethod
     def check_and_open_repo(filepath):
+        # Reset all repo-related settings
         GinderGit.repo_dir = None
         GinderGit.github_repo = None
         GinderGit.remote_repo = None
         GinderGit.local_repo = None
+        GinderGit.local_reponame = None
         GinderGit.remote_username = None
         GinderGit.remote_reponame = None 
         GinderGit.githubpages_url = None
+        
+        # Check if we can safely perform
         if not GinderState.pygit2_present():
             raise Exception('check_for_repo() called without prerequisites installed.')
         if not filepath:
             raise Exception('check_for_repo() called without filepath specified.')
         import pygit2
+
+        # Try to find a local git repo along the path
         curdir = os.path.dirname(filepath)
-        GinderGit.repo_dir = pygit2.discover_repository(curdir)
+        GinderGit.repo_dir = pygit2.discover_repository(curdir) # yields something like "C:/Develop/REPONAME/.git/"
+        if not GinderGit.repo_dir:
+            return False
+        GinderGit.repo_dir.replace('\\', '/')
         GinderGit.local_repo = pygit2.Repository(GinderGit.repo_dir)
+        pieces = GinderGit.repo_dir.split('/')
+        GinderGit.local_reponame = pieces[-3]
+
+        # Check if there is a remote (the 'origin')
         GinderGit.remote_repo = GinderGit.local_repo.remotes[0]
         urlstr = GinderGit.remote_repo.url
         url = urllib.parse.urlparse(urlstr)
@@ -313,6 +329,8 @@ class GinderGit:
         GinderGit.remote_username = pieces[-2]
         reponame = pieces[-1]
         GinderGit.remote_reponame = reponame.split('.')[0]
+
+        # Try to connect to the remote on GitHub
         from github import Github
         from github import Auth
         auth=Auth.Token(GinderPreferences.get_github_token())
@@ -320,6 +338,7 @@ class GinderGit:
         GinderGit.github_repo = g.get_repo(f'{GinderGit.remote_username}/{GinderGit.remote_reponame}')
         GinderGit.get_github_page_url()
         g.close()
+        return True
 
     @staticmethod
     def sync_repo():
@@ -329,7 +348,7 @@ class GinderGit:
             raise Exception('sync_repo() called without current github repo')
 
     @staticmethod
-    def create_new_repo(repo_name:str, remote_username:str, remote_reponame:str):
+    def create_new_repo(repo_name:str, template_username:str, template_reponame:str):
         if not GinderGit.github_user:
             raise Exception('create_new_repo() called without registered user')
         from github import Github
@@ -337,12 +356,13 @@ class GinderGit:
         auth=Auth.Token(GinderPreferences.get_github_token())
         g = Github(auth=auth)
 
-        template = f'{remote_username}/{remote_reponame}'
+        template = f'{template_username}/{template_reponame}'
         template_repo = g.get_repo(template)
 
         GinderGit.github_repo = GinderGit.github_user.create_repo_from_template(repo_name, template_repo, description='For debugging purposes only', include_all_branches=False, private=False)
-        GinderGit.remote_username = remote_username
-        GinderGit.remote_reponame = remote_reponame
+        # We created the new remote repo on behalf of the user with the given name, so we know the user name and the repo
+        GinderGit.remote_username = GinderGit.github_user.login
+        GinderGit.remote_reponame = repo_name
 
         g.close()
 
@@ -372,8 +392,10 @@ class GinderGit:
         url = f'https://api.github.com/repos/{GinderGit.remote_username}/{GinderGit.remote_reponame}/pages'
         
         res = requests.get(url=url, headers=headers)
-        if 200 >= res.status_code and res.status_code <= 300:
+        if 200 <= res.status_code and res.status_code <= 300:
             GinderGit.githubpages_url = res.json()['html_url']
+        else:
+            raise Exception(f'Could not retrieve GitHub-page url for repo \'{GinderGit.remote_reponame}\' owned by \'{GinderGit.remote_username}\'')
         
     @staticmethod
     def enable_github_pages():
@@ -399,8 +421,10 @@ class GinderGit:
         # PyGithub seems to lack this API, so we need to CURL it by hand
         #curl -L -X POST -H "Accept: application/vnd.github+json" -H "Authorization: Bearer <TOKEN>" -H "X-GitHub-Api-Version: 2022-11-28" https://api.github.com/repos/griestopf/FromFreeDeeTest/pages -d '{"build_type":"workflow", "source":{"branch":"main","path":"/docs"}}'
         res = requests.post(url=url, headers=headers, json=data)
-        if 200 >= res.status_code and res.status_code <= 300:
+        if 200 <= res.status_code and res.status_code <= 300:
             GinderGit.githubpages_url = res.json()['html_url']
+        else:
+            raise Exception(f'Could not retrieve GitHub-page url for repo \'{GinderGit.remote_reponame}\' owned by \'{GinderGit.remote_username}\'')
         
 
     @staticmethod
@@ -420,7 +444,9 @@ class GinderGit:
         callbacks=pygit2.RemoteCallbacks(credentials=credentials)
         GinderGit.local_repo = pygit2.clone_repository(GinderGit.github_repo.clone_url, local_dir, callbacks=callbacks)
         
-
+    @staticmethod
+    def pending_changes() -> int:
+        return 1
 
 
 #######################################################################################################
@@ -579,7 +605,7 @@ def install_prerequisites() -> bool:
 
 class InstallPrerequisitesOperator(bpy.types.Operator):
     """Download and install python modules required by this Add-on"""
-    bl_idname = the_unique_name_of_the_install_prerequisites_button
+    bl_idname = id_for_install_prerequisites_operator
     bl_label = "Install Prerequisites"
 
     def execute(self, context):
@@ -632,7 +658,7 @@ def uninstall_prerequisites() -> bool:
 
 class UninstallPrerequisitesOperator(bpy.types.Operator):
     """Remove python modules installed by this Add-on. Click only if you plan to uninstall this Add-on."""
-    bl_idname = the_unique_name_of_the_uninstall_prerequisites_button
+    bl_idname = id_for_uninstall_prerequisites_operator
     bl_label = "Uninstall Prerequisites"
 
     def execute(self, context):
@@ -672,7 +698,7 @@ def launch():
 
 class RestartBlenderOperator(bpy.types.Operator):
     """Restart Blender to reflect changes by previous installation/uninstallation of python modules"""
-    bl_idname = the_unique_name_of_the_restart_blender_button
+    bl_idname = id_for_restart_blender_operator
     bl_label = "Restart Blender"
 
     def execute(self, context):
@@ -780,7 +806,7 @@ def do_url_open(url:str):
 
 class RegisterWithGitHubOperator(bpy.types.Operator):
     """Opens up your Web browser showing a page where you can register Ginder (this Add-on) with your user account. This will allow Ginder to access your public GitHub repositories"""
-    bl_idname = the_unique_name_of_the_register_with_github_button
+    bl_idname = id_for_register_with_github_operator
     bl_label = "Register with GitHub"
 
     def execute(self, context):
@@ -835,7 +861,7 @@ class RegisterWithGitHubOperator(bpy.types.Operator):
 
 class DeregisterFromGitHubOperator(bpy.types.Operator):
     """Reset GitHub registration. To finally remove your Ginder registration from GitHub, revoke Ginder access from github.com/settings/applications"""
-    bl_idname = the_unique_name_of_the_deregister_from_github_button
+    bl_idname = id_for_deregister_from_github_operator
     bl_label = "Reset GitHub registration"
 
     def execute(self, context):
@@ -857,7 +883,7 @@ class DeregisterFromGitHubOperator(bpy.types.Operator):
 
 class OpenGinderPrefsOperator(bpy.types.Operator):
     """Open the Ginder Add-On's preferences"""
-    bl_idname = the_unique_name_of_the_ginder_preferences_button
+    bl_idname = id_for_ginder_preferences_operator
     bl_label = "Ginder Preferences"
 
     def execute(self, context):
@@ -865,7 +891,7 @@ class OpenGinderPrefsOperator(bpy.types.Operator):
         bpy.context.preferences.active_section = 'ADDONS'
         bpy.data.window_managers["WinMan"].addon_search = the_readable_name_of_the_addon
         bpy.data.window_managers["WinMan"].addon_support = {'COMMUNITY'}
-        bpy.ops.preferences.addon_show(module=the_unique_name_of_the_addon)
+        bpy.ops.preferences.addon_show(module=id_for_addon)
         return {'FINISHED'}
 
 #######################################################################################################
@@ -892,7 +918,7 @@ def copy2clip(txt:str):
 
 class CopyRegistrationLinkOperator(bpy.types.Operator):
     """If your browser does not open the Ginder registration page autmatically, click this button to copy the GitHub registration link to the clipboard. Afterwards, open your browser and paste the copied link"""
-    bl_idname = the_unique_name_of_the_copy_registration_link_button
+    bl_idname = id_for_copy_registration_link_operator
     bl_label = "Copy Registration Link to Clipboard"
 
     def execute(self, context):
@@ -913,15 +939,15 @@ class CopyRegistrationLinkOperator(bpy.types.Operator):
 class GinderPreferences(AddonPreferences):
     # this must match the add-on name, use '__package__'
     # when defining this in a submodule of a python package.
-    bl_idname = the_unique_name_of_the_addon
+    bl_idname = id_for_addon
 
     @staticmethod
     def set_github_token(token:str) -> None:
-        bpy.context.preferences.addons[the_unique_name_of_the_addon].preferences.github_token = token
+        bpy.context.preferences.addons[id_for_addon].preferences.github_token = token
 
     @staticmethod
     def get_github_token() -> str:
-        return bpy.context.preferences.addons[the_unique_name_of_the_addon].preferences.github_token
+        return bpy.context.preferences.addons[id_for_addon].preferences.github_token
 
     github_token: StringProperty(
         name="GitHub Token",
@@ -930,11 +956,11 @@ class GinderPreferences(AddonPreferences):
 
     # @staticmethod
     # def set_github_user(user:str) -> None:
-    #     bpy.context.preferences.addons[the_unique_name_of_the_addon].preferences.github_user = user
+    #     bpy.context.preferences.addons[id_for_addon].preferences.github_user = user
 
     # @staticmethod
     # def get_github_user() -> str:
-    #     return bpy.context.preferences.addons[the_unique_name_of_the_addon].preferences.github_user
+    #     return bpy.context.preferences.addons[id_for_addon].preferences.github_user
 
     # github_user: StringProperty(
     #     name="GitHub User",
@@ -970,12 +996,12 @@ class GinderPreferences(AddonPreferences):
         # STATUSBOX LINE ONE
         #col.label(text = status_text)
         # STATUSBOX LINE TWO
-        #col.operator(the_unique_name_of_the_restart_blender_button, icon='BLENDER')
+        #col.operator(id_for_restart_blender_button, icon='BLENDER')
 
         match GinderState.state:
             case GinderState.ADDON_INSTALLED:
                 col.label(text = status_text)
-                col.operator(the_unique_name_of_the_install_prerequisites_button, icon='SCRIPT')
+                col.operator(id_for_install_prerequisites_operator, icon='SCRIPT')
 
             case GinderState.INSTALLING_PREREQ |GinderState.UNINSTALLING_PREREQ:
                 col.label(text = status_text)
@@ -983,20 +1009,21 @@ class GinderPreferences(AddonPreferences):
 
             case GinderState.READY_FOR_RESTART:
                 col.label(text = status_text)
-                col.operator(the_unique_name_of_the_restart_blender_button, icon='QUIT')
+                col.operator(id_for_restart_blender_operator, icon='QUIT')
                 
             case GinderState.PREREQ_INSTALLED:
                 col.label(text = status_text)
-                col.operator(the_unique_name_of_the_register_with_github_button, icon_value = preview_collections['main']['the_github_icon'].icon_id)
-                col.operator(the_unique_name_of_the_uninstall_prerequisites_button, icon='CANCEL')
+                col.operator(id_for_register_with_github_operator, icon_value = preview_collections['main']['the_github_icon'].icon_id)
+                col.operator(id_for_uninstall_prerequisites_operator, icon='CANCEL')
 
             case GinderState.REGISTERING_GITHUB:
                 col.progress(factor=UIUpdate.progress, type = 'RING', text=status_text)
-                col.operator(the_unique_name_of_the_copy_registration_link_button, icon='URL')
+                col.operator(id_for_copy_registration_link_operator, icon='URL')
 
             case GinderState.GITHUB_REGISTERED:
                 col.label(text = status_text)
-                col.operator(the_unique_name_of_the_deregister_from_github_button, icon='CANCEL')
+                col.operator(id_for_ginder_open_users_github_page_operator, icon='URL')
+                col.operator(id_for_deregister_from_github_operator, icon='CANCEL')
 
             case _:
                 col.label(text = 'Undefined State. Try to disable/enable or to remove/re-install Ginder')
@@ -1021,7 +1048,7 @@ class GinderPreferences(AddonPreferences):
 # inspired by https://blender.stackexchange.com/questions/14738/use-filemanager-to-select-directory-instead-of-file
 class CreateNewPresentationRepo(bpy.types.Operator):
     """Create a new presentation repo at your GitHub account and clone it to a selected directory on your local storage"""
-    bl_idname = the_unique_name_of_the_create_new_presentation_repo_button
+    bl_idname = id_for_create_new_presentation_repo_operator
     bl_label = "Create New Repo"
     bl_options = {'REGISTER'}
 
@@ -1069,14 +1096,13 @@ class CreateNewPresentationRepo(bpy.types.Operator):
 
         repo_name = os.path.basename(os.path.normpath(self.directory))
         try:
-            remote_username, remote_reponame = [('griestopf', 'FreeDee'), 'DEBUG'][int(self.template_repo)]
-            GinderGit.create_new_repo(repo_name, remote_username, remote_reponame)
+            template_username, template_reponame = [('griestopf', 'FreeDee'), ('DEBUG_username', 'DEBUG_reponame')][int(self.template_repo)]
+            GinderGit.create_new_repo(repo_name, template_username, template_reponame)
             GinderGit.enable_github_pages()
             GinderGit.clone_repo(self.directory)
         except Exception as ex:
-            report_error('ERROR', f'Could not create repository "{str(self.directory)}": \n{str(ex)}')
+            report_error('ERROR', f'Error while creating repository "{str(self.directory)}": \n{str(ex)}')
             return {'CANCELLED'}
-
 
         return {'FINISHED'}
 
@@ -1103,7 +1129,7 @@ class CreateNewPresentationRepo(bpy.types.Operator):
 
 class OpenUsersGitHubProfileOperator(bpy.types.Operator):
     """Open the current user's GitHub user profile"""
-    bl_idname = the_unique_name_of_the_ginder_open_users_github_page_button
+    bl_idname = id_for_ginder_open_users_github_page_operator
     bl_label = "Open GitHub user profile"
 
 
@@ -1134,7 +1160,7 @@ class OpenUsersGitHubProfileOperator(bpy.types.Operator):
 
 class OpenReposGitHubPageOperator(bpy.types.Operator):
     """Open the current presentation repo's GitHub Page"""
-    bl_idname = the_unique_name_of_the_ginder_open_repos_github_page_button
+    bl_idname = id_for_ginder_open_repos_github_page_operator
     bl_label = "Open GitHub-Pages page"
 
     @classmethod
@@ -1150,9 +1176,63 @@ class OpenReposGitHubPageOperator(bpy.types.Operator):
             do_url_open(GinderGit.githubpages_url)
             return {'FINISHED'}
         except Exception as ex:
-            report_error('ERROR', f'Could not Open GitHubPage of {lrep.name}.\n{ex}')
+            report_error('ERROR', f'Could not Open GitHubPage of {GinderGit.remote_reponame}.\n{ex}')
             return {'CANCELLED'}
 
+
+#######################################################################################################
+#
+#  COMMIT TO REPO 
+#
+#######################################################################################################
+
+class CommitToRepoOperator(bpy.types.Operator):
+    """Commit changes in all files in the repo directory to the local repository"""
+    bl_idname = id_for_commit_to_repo_operator
+    bl_label = "Commit Changes to Repo"
+
+    @classmethod
+    def poll(cls, context):
+        return GinderGit.local_repo and GinderGit.pending_changes() > 0
+
+    def execute(self, context):
+        if not (GinderGit.local_repo and GinderGit.pending_changes() > 0):
+            report_error('ERROR', 'Cannot commit to repo.')
+            return {'CANCELLED'}
+
+        try:
+            print(f'Commit to {GinderGit.local_repo.path}')
+            return {'FINISHED'}
+        except Exception as ex:
+            report_error('ERROR', f'Could not Commit to {GinderGit.local_repo.path}.\n{ex}')
+            return {'CANCELLED'}
+
+
+#######################################################################################################
+#
+#  SYNC CHANGES WITH REMOTE REPO 
+#
+#######################################################################################################
+
+class SyncChangesWithRemoteOperator(bpy.types.Operator):
+    """First Pull changes from the remote repository on GitHub, then push committed changes to the remote repository"""
+    bl_idname = id_for_sync_with_remote_operator
+    bl_label = "Sync Changes with Remote Repo"
+
+    @classmethod
+    def poll(cls, context):
+        return GinderGit.remote_repo 
+
+    def execute(self, context):
+        if not (GinderGit.remote_repo):
+            report_error('ERROR', 'Cannot sync changes to remote repo.')
+            return {'CANCELLED'}
+        try:
+            print(f'Sync changes with {GinderGit.remote_reponame}')
+            return {'FINISHED'}
+        except Exception as ex:
+            report_error('ERROR', f'Could sync changes with {GinderGit.remote_reponame}.\n{ex}')
+            return {'CANCELLED'}
 
 
 #######################################################################################################
@@ -1174,29 +1254,43 @@ class GinderMenu(bpy.types.Menu):
         # if GinderState.state == GinderState.GITHUB_REGISTERED:
         layout = self.layout
 
-        # layout.operator('wm.open_mainfile')
-        # layout.operator('wm.save_as_mainfile').copy = True
+        numberofchanges = GinderGit.pending_changes()
+        if  GinderGit.local_repo and numberofchanges > 0:
+            layout.operator(id_for_commit_to_repo_operator, text=f'Commit {numberofchanges} Change{"s" if numberofchanges > 1 else ""} to {GinderGit.local_reponame}', icon='CHECKMARK')
+        else:
+            layout.operator(id_for_commit_to_repo_operator, icon='CHECKMARK')
+
+        if GinderGit.remote_repo:
+            layout.operator(id_for_sync_with_remote_operator, text=f'Sync with {GinderGit.remote_reponame}', icon='FILE_REFRESH')
+        else:
+            layout.operator(id_for_sync_with_remote_operator, icon='FILE_REFRESH')
+
+
         if GinderGit.remote_reponame:
             # layout.label(f'Repo {GinderGit.remote_reponame} on GitHub')
-            layout.operator(the_unique_name_of_the_ginder_open_repos_github_page_button, text=f'Open {GinderGit.remote_reponame}\'s GitHub-Pages page', icon='URL')
+            layout.operator(id_for_ginder_open_repos_github_page_operator, text=f'Open {GinderGit.remote_reponame}\'s GitHub-Pages page', icon='URL')
         else:
-            layout.operator(the_unique_name_of_the_ginder_open_repos_github_page_button, icon='URL')
+            layout.operator(id_for_ginder_open_repos_github_page_operator, icon='URL')
 
-        if GinderState.state == GinderState.GITHUB_REGISTERED:
-            layout.operator(the_unique_name_of_the_ginder_open_users_github_page_button, text=f'Open {GinderState.get_login_name()}\'s GitHub user profile', icon='URL')
-        else:
-            layout.operator(the_unique_name_of_the_ginder_open_users_github_page_button, icon='URL')
+        # if GinderState.state == GinderState.GITHUB_REGISTERED:
+        #     layout.operator(id_for_ginder_open_users_github_page_operator, text=f'Open {GinderState.get_login_name()}\'s GitHub user profile', icon='URL')
+        # else:
+        #     layout.operator(id_for_ginder_open_users_github_page_operator, icon='URL')
 
-        layout.operator(the_unique_name_of_the_create_new_presentation_repo_button, icon = 'NEWFOLDER')
+        layout.operator(id_for_create_new_presentation_repo_operator, icon = 'NEWFOLDER')
 
-        layout.operator(the_unique_name_of_the_ginder_preferences_button, icon='PREFERENCES')
+        layout.operator(id_for_ginder_preferences_operator, icon='PREFERENCES')
 
 
 #######################################################################################################
 
 def draw_ginder_menu(self, context):
     layout = self.layout
-    layout.menu(GinderMenu.bl_idname, text = 'Ginder - darepo', icon_value = preview_collections['main']["the_ginder_icon"].icon_id)
+    if GinderGit.local_reponame:
+        text = f'{GinderGit.local_reponame} - Ginder'
+    else: 
+        text = 'Ginder'
+    layout.menu(GinderMenu.bl_idname, text = text, icon_value = preview_collections['main']["the_ginder_icon"].icon_id)
 
 
 #######################################################################################################
@@ -1241,6 +1335,8 @@ def register():
     bpy.utils.register_class(OpenUsersGitHubProfileOperator)
     bpy.utils.register_class(OpenReposGitHubPageOperator)
     bpy.utils.register_class(CreateNewPresentationRepo)
+    bpy.utils.register_class(CommitToRepoOperator)
+    bpy.utils.register_class(SyncChangesWithRemoteOperator)
     bpy.utils.register_class(GinderMenu)
     bpy.types.TOPBAR_MT_file.prepend(draw_ginder_menu)
     bpy.context.preferences.use_preferences_save = True # see https://blender.stackexchange.com/questions/157677/add-on-preferences-auto-saving-bug
@@ -1254,6 +1350,8 @@ def unregister():
     UIUpdate.stop_pulse()
     bpy.types.TOPBAR_MT_file.remove(draw_ginder_menu)
     bpy.utils.unregister_class(GinderMenu)
+    bpy.utils.unregister_class(SyncChangesWithRemoteOperator)
+    bpy.utils.unregister_class(CommitToRepoOperator)
     bpy.utils.unregister_class(CreateNewPresentationRepo)
     bpy.utils.unregister_class(OpenReposGitHubPageOperator)
     bpy.utils.unregister_class(OpenUsersGitHubProfileOperator)
