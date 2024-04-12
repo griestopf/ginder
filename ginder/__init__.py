@@ -148,11 +148,15 @@ def check_token(token: str):
     except:
         GinderState.state = GinderState.PREREQ_INSTALLED
         return
-    
+        
+    try:
+        useremail = next(item for item in user.get_emails() if item.primary == True).email
+    except:
+        useremail = "Noreply"
     g.close()
 
     # We're still here: notify the main thread
-    run_in_main_thread(functools.partial(GinderGit.set_user,  user))
+    run_in_main_thread(functools.partial(GinderGit.set_user,  user, useremail))
     GinderState.state = GinderState.GITHUB_REGISTERED
 
     # Try to load the user avatar (if not already loaded during this session)
@@ -279,6 +283,7 @@ class GinderState:
 
 class GinderGit:
     github_user = None
+    github_useremail: str = None # Must be set by user
     repo_dir:str = None
     github_repo = None # This is the remote presentation repo (origin) as a PyGithub-typedobject
     remote_repo = None # This is the remote presentation repo (origin) as a pygit2-typed object (https://www.pygit2.org/remotes.html#pygit2.Remote)
@@ -289,8 +294,9 @@ class GinderGit:
     githubpages_url: str = None
 
     @staticmethod
-    def set_user(user):
+    def set_user(user, useremail):
         GinderGit.github_user = user
+        GinderGit.github_useremail = useremail
 
     @staticmethod
     def check_and_open_repo(filepath):
@@ -443,10 +449,53 @@ class GinderGit:
         # callbacks=MyRemoteCallbacks(credentials=credentials)
         callbacks=pygit2.RemoteCallbacks(credentials=credentials)
         GinderGit.local_repo = pygit2.clone_repository(GinderGit.github_repo.clone_url, local_dir, callbacks=callbacks)
-        
+
+    @staticmethod
+    def commit(message:str):
+        # https://stackoverflow.com/questions/49458329/create-clone-and-push-to-github-repo-using-pygithub-and-pygit2
+        if not GinderGit.github_user:
+            raise Exception('commit() called without GitHub user')
+        if not GinderGit.local_repo:
+            raise Exception('commit() called without local repository')
+        import pygit2
+
+        index = GinderGit.local_repo.index
+        index.add_all()
+        index.write()
+        author = pygit2.Signature(GinderGit.github_user.name, GinderGit.github_useremail)
+        commiter = pygit2.Signature(GinderGit.github_user.name, GinderGit.github_useremail)
+        tree = index.write_tree()
+        oid = GinderGit.local_repo.create_commit(GinderGit.local_repo.head.name, author, commiter, message, tree,[GinderGit.local_repo.head.target])
+
+    @staticmethod
+    def push():
+        if not GinderGit.github_user:
+            raise Exception('push() called without GitHub user')
+        if not GinderGit.local_repo:
+            raise Exception('push() called without local repository')
+        if not GinderGit.remote_repo:
+            raise Exception('push() called without remote repository')
+        import pygit2
+
+        remote = GinderGit.remote_repo
+        credentials = pygit2.UserPass(GinderPreferences.get_github_token(),'x-oauth-basic')
+
+        # class MyRemoteCallbacks(pygit2.RemoteCallbacks):
+        #     def transfer_progress(self, stats):
+        #         print(f'{stats.indexed_objects}/{stats.total_objects}')
+        # callbacks=MyRemoteCallbacks(credentials=credentials)
+        callbacks=pygit2.RemoteCallbacks(credentials=credentials)
+        remote.push([GinderGit.local_repo.head.name], callbacks=callbacks)
+
+
     @staticmethod
     def pending_changes() -> int:
-        return 1
+        if not GinderGit.local_repo:
+            return 0
+
+        index = GinderGit.local_repo.index
+        index.read()
+        return len(index.diff_to_workdir())
 
 
 #######################################################################################################
@@ -553,9 +602,12 @@ class UIUpdate:
                     UIUpdate.speed = -UIUpdate.speed
         
         # print(f'pulsing every {UIUpdate.spf} second.')
-
+        
+        # UIUpdate.area.type is either 'TOPBAR' or 'PREFERENCES'
+        # try positively asking for that to avoid crashes
         if UIUpdate.area and not UIUpdate.area.type == 'EMPTY':
             # TODO: Make sure the area is still valid
+            print(UIUpdate.area.type)
             UIUpdate.area.tag_redraw()
         return UIUpdate.spf
 
@@ -771,7 +823,7 @@ def do_register_with_github():
         # Thus we need scope="repo" (including private repos), or scope="public_repo" (public repos only, no access to private repos).
         # For different scopes, see: https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps
         # The required scope will be shown to the user on the authorization_url web page asking the users confirmation.
-        oa2 = OAuth2Session(ginder_oauth2_client_id, scope="public_repo")
+        oa2 = OAuth2Session(ginder_oauth2_client_id, scope="public_repo,user:email")
 
         # Redirect user to GitHub for authorization
         authorization_url, state = oa2.authorization_url(github_authorization_base_url)
@@ -870,7 +922,8 @@ class DeregisterFromGitHubOperator(bpy.types.Operator):
             return {'FINISHED'}
         GinderPreferences.set_github_token('')
         # GinderPreferences.set_github_user('')
-        del preview_collections['main']['the_avatar_icon']
+        try: del preview_collections['main']['the_avatar_icon'] 
+        except: pass
         GinderState.state = GinderState.PREREQ_INSTALLED
         do_url_open(f'https://github.com/settings/connections/applications/{ginder_oauth2_client_id}')
         return {'FINISHED'}
@@ -1202,6 +1255,7 @@ class CommitToRepoOperator(bpy.types.Operator):
 
         try:
             print(f'Commit to {GinderGit.local_repo.path}')
+            GinderGit.commit('Ginder Commit')
             return {'FINISHED'}
         except Exception as ex:
             report_error('ERROR', f'Could not Commit to {GinderGit.local_repo.path}.\n{ex}')
@@ -1221,14 +1275,15 @@ class SyncChangesWithRemoteOperator(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return GinderGit.remote_repo 
+        return GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo
 
     def execute(self, context):
-        if not (GinderGit.remote_repo):
-            report_error('ERROR', 'Cannot sync changes to remote repo.')
+        if not (GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo):
+            report_error('ERROR', 'Cannot sync changes with remote repo.')
             return {'CANCELLED'}
         try:
             print(f'Sync changes with {GinderGit.remote_reponame}')
+            GinderGit.push()
             return {'FINISHED'}
         except Exception as ex:
             report_error('ERROR', f'Could sync changes with {GinderGit.remote_reponame}.\n{ex}')
