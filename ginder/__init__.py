@@ -28,6 +28,8 @@ import atexit
 import time
 import platform
 import urllib
+import string
+import random
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from enum import Enum
 
@@ -64,9 +66,10 @@ id_for_ginder_open_users_github_page_operator = "ginder.open_users_github_page"
 id_for_create_new_presentation_repo_operator = "ginder.create_new_presentation_repo"
 id_for_ginder_open_repos_github_page_operator = "ginder.open_repos_github_page"
 id_for_commit_to_repo_operator = "ginder.commit_to_repo"
-id_for_sync_with_remote_operator = "ginder.sync_with_remote"
-
-
+id_for_push_to_remote_operator = "ginder.push_to_remote"
+id_for_pull_from_remote_operator = "ginder.pull_from_remote"
+id_for_merge_theirs_operator = "ginder.merge_theirs"
+id_for_merge_ours_operator = "ginder.merge_ours"
 
 #######################################################################################################
 #
@@ -292,6 +295,8 @@ class GinderGit:
     remote_username: str = None   # Probably the same as github_user.login but not necessarily
     remote_reponame: str = None 
     githubpages_url: str = None
+    last_fetch_time:float = 0.0
+    fetch_period:float = 15.0
 
     @staticmethod
     def set_user(user, useremail):
@@ -309,7 +314,7 @@ class GinderGit:
         GinderGit.remote_username = None
         GinderGit.remote_reponame = None 
         GinderGit.githubpages_url = None
-        
+                
         # Check if we can safely perform
         if not GinderState.pygit2_present():
             raise Exception('check_for_repo() called without prerequisites installed.')
@@ -344,6 +349,9 @@ class GinderGit:
         GinderGit.github_repo = g.get_repo(f'{GinderGit.remote_username}/{GinderGit.remote_reponame}')
         GinderGit.get_github_page_url()
         g.close()
+
+        # Fetch any pending changes
+        GinderGit.refetch()
         return True
 
     @staticmethod
@@ -489,13 +497,113 @@ class GinderGit:
 
 
     @staticmethod
-    def pending_changes() -> int:
+    def fetch():
+        '''Performs a git fetch.'''
+        if not GinderGit.github_user:
+            raise Exception('fetch() called without GitHub user')
+        if not GinderGit.local_repo:
+            raise Exception('fetch() called without local repository')
+        if not GinderGit.remote_repo:
+            raise Exception('fetch() called without remote repository')
+        import pygit2
+
+        remote = GinderGit.remote_repo
+        credentials = pygit2.UserPass(GinderPreferences.get_github_token(),'x-oauth-basic')
+
+        # class MyRemoteCallbacks(pygit2.RemoteCallbacks):
+        #     def transfer_progress(self, stats):
+        #         print(f'{stats.indexed_objects}/{stats.total_objects}')
+        # callbacks=MyRemoteCallbacks(credentials=credentials)
+        callbacks=pygit2.RemoteCallbacks(credentials=credentials)
+        remote.fetch(callbacks=callbacks)
+
+    @staticmethod
+    def refetch():
+        '''Performs a git fetch if the last fetch is not too far away'''
+        curtime = time.time()
+        if curtime - GinderGit.last_fetch_time > GinderGit.fetch_period:
+            GinderGit.fetch()
+            GinderGit.last_fetch_time = curtime
+        
+
+    # inspired by https://github.com/MichaelBoselowitz/pygit2-examples/blob/master/examples.py#L54
+    @staticmethod
+    def pull(keep_theirs:bool):
+        import pygit2
+        remote_name = 'origin'
+        branch = 'main'
+        for remote in GinderGit.local_repo.remotes:
+            if remote.name == remote_name:
+                GinderGit.fetch()
+                remote_master_id = GinderGit.local_repo.lookup_reference(f'refs/remotes/{remote_name}/{branch}').target
+                merge_result, _ = GinderGit.local_repo.merge_analysis(remote_master_id)
+                # Up to date, do nothing
+                if merge_result & pygit2.GIT_MERGE_ANALYSIS_UP_TO_DATE:
+                    return
+                # We can just fastforward
+                elif merge_result & pygit2.GIT_MERGE_ANALYSIS_FASTFORWARD:
+                    GinderGit.local_repo.checkout_tree(GinderGit.local_repo.get(remote_master_id))
+                    try:
+                        master_ref = GinderGit.local_repo.lookup_reference('refs/heads/%s' % (branch))
+                        master_ref.set_target(remote_master_id)
+                    except KeyError:
+                        GinderGit.local_repo.create_branch(branch, GinderGit.local_repo.get(remote_master_id))
+                    GinderGit.local_repo.head.set_target(remote_master_id)
+                elif merge_result & pygit2.GIT_MERGE_ANALYSIS_NORMAL:
+                    # No file based line-by-line merge. The user has decided to keep "theirs" or "ours"
+                    # GinderGit.local_repo.merge(remote_master_id)
+                    # if GinderGit.local_repo.index.conflicts is not None:
+                    #     for conflict in GinderGit.local_repo.index.conflicts:
+                    #         print('Conflicts found in:', conflict[0].path)
+                    #     raise AssertionError('Conflicts, ahhhhh!!')
+                    favor = pygit2.enums.MergeFavor.THEIRS if keep_theirs else pygit2.enums.MergeFavor.OURS
+                    GinderGit.local_repo.merge(remote_master_id, favor=favor)
+
+                    # This should never happen with favor=THEIRS or OURS
+                    if GinderGit.local_repo.index.conflicts is not None:
+                        raise AssertionError(f'push() encountered conflicts during merge although merged with {favor}.')
+
+                    user = GinderGit.local_repo.default_signature
+                    tree = GinderGit.local_repo.index.write_tree()
+                    commit = GinderGit.local_repo.create_commit('HEAD',
+                                                user,
+                                                user,
+                                                'Merge!',
+                                                tree,
+                                                [GinderGit.local_repo.head.target, remote_master_id])
+                    # We need to do this or git CLI will think we are still merging.
+                    GinderGit.local_repo.state_cleanup()
+                else:
+                    raise AssertionError('Unknown merge analysis result')
+
+
+
+    @staticmethod
+    def pending_local_changes() -> int:
+        '''Returns the number of changes on the local git repository (file changes not added to the index and/or not committed)'''
         if not GinderGit.local_repo:
             return 0
 
         index = GinderGit.local_repo.index
         index.read()
         return len(index.diff_to_workdir())
+
+    @staticmethod
+    def pending_synch_changes() -> tuple[int, int]:
+        '''Returns the number of ahead and behind commits of the local HEAD compared to the remote HEAD (origin).
+           The first int of the returned tuple ist the number of commits the local branch is AHEAD of the 
+           remote branch - the number of changes that need to be pushed to the remote repo.
+           The second int of the returned tuple ist the number of commits the local branch is BEHIND the
+           remote branch - the number of changes that need to be pulled from the remote repo.
+        '''
+        # From answer 3 in https://stackoverflow.com/questions/19930935/how-to-calculate-ahead-or-behind-branchs
+        if not GinderGit.local_repo:
+            raise Exception('pending_synch_changes() called without local repository')
+
+        upstream_head = GinderGit.local_repo.revparse_single('origin/HEAD')
+        local_head    = GinderGit.local_repo.revparse_single('HEAD')
+        diff = GinderGit.local_repo.ahead_behind(local_head.id, upstream_head.id)
+        return diff
 
 
 #######################################################################################################
@@ -970,7 +1078,7 @@ def copy2clip(txt:str):
     return subprocess.check_call(cmd, shell=True)
 
 class CopyRegistrationLinkOperator(bpy.types.Operator):
-    """If your browser does not open the Ginder registration page autmatically, click this button to copy the GitHub registration link to the clipboard. Afterwards, open your browser and paste the copied link"""
+    """If your browser does not open the Ginder registration page automatically, click this button to copy the GitHub registration link to the clipboard. Afterwards, open your browser and paste the copied link"""
     bl_idname = id_for_copy_registration_link_operator
     bl_label = "Copy Registration Link to Clipboard"
 
@@ -1152,6 +1260,9 @@ class CreateNewPresentationRepo(bpy.types.Operator):
             template_username, template_reponame = [('griestopf', 'FreeDee'), ('DEBUG_username', 'DEBUG_reponame')][int(self.template_repo)]
             GinderGit.create_new_repo(repo_name, template_username, template_reponame)
             GinderGit.enable_github_pages()
+            # Wait a couple of seconds, otherwise the new GitHub repo is not completely accessible/cloneable from pygit2.
+            # directly cloning after creation will lead to incomplete local versions (only .git directory. No other content)
+            time.sleep(5)
             GinderGit.clone_repo(self.directory)
         except Exception as ex:
             report_error('ERROR', f'Error while creating repository "{str(self.directory)}": \n{str(ex)}')
@@ -1225,8 +1336,19 @@ class OpenReposGitHubPageOperator(bpy.types.Operator):
             report_error('ERROR', 'Ginder not registered with GitHub. Could not open user\'s GitHub page.')
             return {'CANCELLED'}
 
+
         try:
-            do_url_open(GinderGit.githubpages_url)
+            # Add a minimal pseudo query string with changing keys/values to keep the CDN delivering
+            # the generated GitHub page content from too much caching. 
+            # According to https://stackoverflow.com/questions/24851824/how-long-does-it-take-for-github-page-to-show-changes-after-changing-index-html
+            # this should work, but not sure if it really does.
+            if GinderGit.local_repo:
+                local_head    = GinderGit.local_repo.revparse_single('HEAD')
+                version = local_head.hex[:4]
+                query_string = f'?v={version}'
+            else:
+                query_string = f'?{random.choice(string.ascii_letters)}={random.choice(string.digits)}'
+            do_url_open(GinderGit.githubpages_url + query_string)
             return {'FINISHED'}
         except Exception as ex:
             report_error('ERROR', f'Could not Open GitHubPage of {GinderGit.remote_reponame}.\n{ex}')
@@ -1246,16 +1368,17 @@ class CommitToRepoOperator(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return GinderGit.local_repo and GinderGit.pending_changes() > 0
+        return GinderGit.local_repo and GinderGit.pending_local_changes() > 0
 
     def execute(self, context):
-        if not (GinderGit.local_repo and GinderGit.pending_changes() > 0):
+        if not (GinderGit.local_repo and GinderGit.pending_local_changes() > 0):
             report_error('ERROR', 'Cannot commit to repo.')
             return {'CANCELLED'}
 
         try:
             print(f'Commit to {GinderGit.local_repo.path}')
-            GinderGit.commit('Ginder Commit')
+            commit_message = f'{bpy.context.window.workspace.name} edits on {bpy.context.object.name} in {bpy.path.basename(bpy.context.blend_data.filepath)}'
+            GinderGit.commit(commit_message)
             return {'FINISHED'}
         except Exception as ex:
             report_error('ERROR', f'Could not Commit to {GinderGit.local_repo.path}.\n{ex}')
@@ -1264,30 +1387,162 @@ class CommitToRepoOperator(bpy.types.Operator):
 
 #######################################################################################################
 #
-#  SYNC CHANGES WITH REMOTE REPO 
+#  PUSH TO REMOTE REPO 
 #
 #######################################################################################################
 
-class SyncChangesWithRemoteOperator(bpy.types.Operator):
-    """First Pull changes from the remote repository on GitHub, then push committed changes to the remote repository"""
-    bl_idname = id_for_sync_with_remote_operator
-    bl_label = "Sync Changes with Remote Repo"
+class PushToRemoteOperator(bpy.types.Operator):
+    """Push all committed changes to the remote repository"""
+    bl_idname = id_for_push_to_remote_operator
+    bl_label = "Push Changes to Remote Repo"
 
     @classmethod
     def poll(cls, context):
-        return GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo
+        if not (GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo):
+            return False
+        GinderGit.refetch()
+        (topush, topull) = GinderGit.pending_synch_changes()        
+        return topush > 0 and topull == 0
 
     def execute(self, context):
         if not (GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo):
-            report_error('ERROR', 'Cannot sync changes with remote repo.')
+            report_error('ERROR', 'Cannot push changes to remote repo.')
             return {'CANCELLED'}
         try:
-            print(f'Sync changes with {GinderGit.remote_reponame}')
-            GinderGit.push()
+            GinderGit.refetch()
+            (topush, topull) = GinderGit.pending_synch_changes()
+            if topush > 0:
+                GinderGit.push()
+            if topull > 0:
+                report_error('ERROR', f'Pushing to {GinderGit.remote_reponame} with {topull} pulls open.')
             return {'FINISHED'}
         except Exception as ex:
-            report_error('ERROR', f'Could sync changes with {GinderGit.remote_reponame}.\n{ex}')
+            report_error('ERROR', f'Could not push to {GinderGit.remote_reponame}.\n{ex}')
             return {'CANCELLED'}
+
+
+#######################################################################################################
+#
+#  PULL FROM REMOTE REPO 
+#
+#######################################################################################################
+
+class PullFromRemoteOperator(bpy.types.Operator):
+    """Pull ahead changes from the remote repository"""
+    bl_idname = id_for_pull_from_remote_operator
+    bl_label = "Pull Changes from Remote Repo"
+
+    @classmethod
+    def poll(cls, context):
+        if not (GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo):
+            return False
+        GinderGit.refetch()
+        (topush, topull) = GinderGit.pending_synch_changes()        
+        return topush == 0 and topull > 0
+
+    def execute(self, context):
+        if not (GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo):
+            report_error('ERROR', 'Cannot pull changes from remote repo.')
+            return {'CANCELLED'}
+        try:
+            GinderGit.refetch()
+            (topush, topull) = GinderGit.pending_synch_changes()
+            if topull > 0:
+                GinderGit.pull(False)
+            if topush > 0:
+                report_error('ERROR', f'Pulling from {GinderGit.remote_reponame} with {topush} pushes open.')
+            return {'FINISHED'}
+        except Exception as ex:
+            report_error('ERROR', f'Could pull changes from {GinderGit.remote_reponame}.\n{ex}')
+            return {'CANCELLED'}
+
+
+#######################################################################################################
+#
+#  Merge Theirs
+#
+#######################################################################################################
+
+class MergeTheirsOperator(bpy.types.Operator):
+    """Merge the changes on the remote repository with those on the local repository. Prefer keeping the remote changes in case of conflicts."""
+    bl_idname = id_for_merge_theirs_operator
+    bl_label = "Merge Changes and Keep Remote Versions for Conflicts"
+    @classmethod
+    def poll(cls, context):
+        if not (GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo):
+            return False
+        GinderGit.refetch()
+        (topush, topull) = GinderGit.pending_synch_changes()        
+        return topush > 0 and topull > 0
+
+    def execute(self, context):
+        if not (GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo):
+            report_error('ERROR', 'Cannot merge changes with remote repo.')
+            return {'CANCELLED'}
+        try:
+            GinderGit.refetch()
+            (topush, topull) = GinderGit.pending_synch_changes()
+            if topull > 0:
+                GinderGit.pull(True)
+            if topush > 0:
+                GinderGit.push()
+            return {'FINISHED'}
+        except Exception as ex:
+            report_error('ERROR', f'Could merge changes with {GinderGit.remote_reponame}.\n{ex}')
+            return {'CANCELLED'}
+
+
+#######################################################################################################
+#
+#  Merge Ours
+#
+#######################################################################################################
+
+class MergeOursOperator(bpy.types.Operator):
+    """Merge the changes on the remote repository with those on the local repository. Prefer keeping your local changes in case of conflicts."""
+    bl_idname = id_for_merge_ours_operator
+    bl_label = "Merge Changes and Keep Local Versions for Conflicts"
+    @classmethod
+    def poll(cls, context):
+        if not (GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo):
+            return False
+        GinderGit.refetch()
+        (topush, topull) = GinderGit.pending_synch_changes()        
+        return topush > 0 and topull > 0
+
+    def execute(self, context):
+        if not (GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo):
+            report_error('ERROR', 'Cannot merge changes with remote repo.')
+            return {'CANCELLED'}
+        try:
+            GinderGit.refetch()
+            (topush, topull) = GinderGit.pending_synch_changes()
+            if topull > 0:
+                GinderGit.pull(False)
+            if topush > 0:
+                GinderGit.push()
+            return {'FINISHED'}
+        except Exception as ex:
+            report_error('ERROR', f'Could merge changes with {GinderGit.remote_reponame}.\n{ex}')
+            return {'CANCELLED'}
+
+
+#######################################################################################################
+#
+#  Ginder -> Synchronize with GitHub MENU
+#
+#######################################################################################################
+
+class SynchronizeMenu(bpy.types.Menu):
+    bl_label = 'Synchronize Menu'
+    bl_idname = 'Ginder_Synchronize_menu'
+
+    def draw(self, context):
+        layout = self.layout
+
+        layout.operator(id_for_merge_theirs_operator, icon_value = preview_collections['main']["the_merge_theirs_icon"].icon_id)
+        layout.operator(id_for_merge_ours_operator, icon_value = preview_collections['main']["the_merge_ours_icon"].icon_id)
+
 
 
 #######################################################################################################
@@ -1309,16 +1564,29 @@ class GinderMenu(bpy.types.Menu):
         # if GinderState.state == GinderState.GITHUB_REGISTERED:
         layout = self.layout
 
-        numberofchanges = GinderGit.pending_changes()
+        numberofchanges = GinderGit.pending_local_changes()
         if  GinderGit.local_repo and numberofchanges > 0:
             layout.operator(id_for_commit_to_repo_operator, text=f'Commit {numberofchanges} Change{"s" if numberofchanges > 1 else ""} to {GinderGit.local_reponame}', icon='CHECKMARK')
         else:
             layout.operator(id_for_commit_to_repo_operator, icon='CHECKMARK')
 
-        if GinderGit.remote_repo:
-            layout.operator(id_for_sync_with_remote_operator, text=f'Sync with {GinderGit.remote_reponame}', icon='FILE_REFRESH')
+        if GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo:
+            GinderGit.refetch()
+            (topush, topull) = GinderGit.pending_synch_changes()
+            if topush > 0 and topull > 0:
+                # Show the sync submenu
+                text = f'Synchronize {str(topull)}↓ and {str(topush)}↑ commits with {GinderGit.remote_reponame}'
+                layout.menu('Ginder_Synchronize_menu', text=text, icon='FILE_REFRESH')
+            elif topull > 0:
+                text = f'Pull {str(topull)} commits from {GinderGit.remote_reponame}'
+                layout.operator(id_for_pull_from_remote_operator, text=text, icon='SORT_ASC')
+            elif topush > 0:
+                text = f'Push {str(topush)} commits to {GinderGit.remote_reponame}'
+                layout.operator(id_for_push_to_remote_operator, text=text, icon='SORT_DESC')
+            else: # no changes to push or pull
+                layout.operator(id_for_push_to_remote_operator, text = f"Synchronize changes with {GinderGit.remote_reponame}", icon='FILE_REFRESH') # should appear disabled
         else:
-            layout.operator(id_for_sync_with_remote_operator, icon='FILE_REFRESH')
+            layout.operator(id_for_push_to_remote_operator, text = f"Synchronize changes with remote repo", icon='FILE_REFRESH') # should appear disabled
 
 
         if GinderGit.remote_reponame:
@@ -1376,6 +1644,8 @@ def register():
     pcoll.load('the_ginder_icon', os.path.join(my_icons_dir, 'ginder_icon_w.png'), 'IMAGE')
     pcoll.load('the_ginder_icon_l', os.path.join(my_icons_dir, 'ginder_icon_g64.png'), 'IMAGE')
     pcoll.load('the_avatar_unknown_icon', os.path.join(my_icons_dir, 'avatar_unknown.png'), 'IMAGE')
+    pcoll.load('the_merge_theirs_icon', os.path.join(my_icons_dir, 'merge_theirs.png'), 'IMAGE')
+    pcoll.load('the_merge_ours_icon', os.path.join(my_icons_dir, 'merge_ours.png'), 'IMAGE')
 
     preview_collections['main'] = pcoll
 
@@ -1391,7 +1661,11 @@ def register():
     bpy.utils.register_class(OpenReposGitHubPageOperator)
     bpy.utils.register_class(CreateNewPresentationRepo)
     bpy.utils.register_class(CommitToRepoOperator)
-    bpy.utils.register_class(SyncChangesWithRemoteOperator)
+    bpy.utils.register_class(PushToRemoteOperator)
+    bpy.utils.register_class(PullFromRemoteOperator)
+    bpy.utils.register_class(MergeTheirsOperator)
+    bpy.utils.register_class(MergeOursOperator)
+    bpy.utils.register_class(SynchronizeMenu)
     bpy.utils.register_class(GinderMenu)
     bpy.types.TOPBAR_MT_file.prepend(draw_ginder_menu)
     bpy.context.preferences.use_preferences_save = True # see https://blender.stackexchange.com/questions/157677/add-on-preferences-auto-saving-bug
@@ -1405,7 +1679,11 @@ def unregister():
     UIUpdate.stop_pulse()
     bpy.types.TOPBAR_MT_file.remove(draw_ginder_menu)
     bpy.utils.unregister_class(GinderMenu)
-    bpy.utils.unregister_class(SyncChangesWithRemoteOperator)
+    bpy.utils.unregister_class(SynchronizeMenu)
+    bpy.utils.unregister_class(MergeOursOperator)
+    bpy.utils.unregister_class(MergeTheirsOperator)
+    bpy.utils.unregister_class(PullFromRemoteOperator)
+    bpy.utils.unregister_class(PushToRemoteOperator)
     bpy.utils.unregister_class(CommitToRepoOperator)
     bpy.utils.unregister_class(CreateNewPresentationRepo)
     bpy.utils.unregister_class(OpenReposGitHubPageOperator)
