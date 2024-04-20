@@ -1368,14 +1368,15 @@ class CommitToRepoOperator(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return GinderGit.local_repo and GinderGit.pending_local_changes() > 0
+        return GinderGit.local_repo and (GinderGit.pending_local_changes() > 0 or bpy.data.is_dirty)
 
     def execute(self, context):
-        if not (GinderGit.local_repo and GinderGit.pending_local_changes() > 0):
+        if not (GinderGit.local_repo and (GinderGit.pending_local_changes() > 0 or bpy.data.is_dirty)):
             report_error('ERROR', 'Cannot commit to repo.')
             return {'CANCELLED'}
-
         try:
+            if bpy.data.is_dirty:
+                bpy.ops.wm.save_mainfile()
             print(f'Commit to {GinderGit.local_repo.path}')
             commit_message = f'{bpy.context.window.workspace.name} edits on {bpy.context.object.name} in {bpy.path.basename(bpy.context.blend_data.filepath)}'
             GinderGit.commit(commit_message)
@@ -1398,7 +1399,8 @@ class PushToRemoteOperator(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        if not (GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo):
+        numberofchanges = GinderGit.pending_local_changes()
+        if not (GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo and numberofchanges == 0 and not bpy.data.is_dirty):
             return False
         GinderGit.refetch()
         (topush, topull) = GinderGit.pending_synch_changes()        
@@ -1434,14 +1436,16 @@ class PullFromRemoteOperator(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        if not (GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo):
+        numberofchanges = GinderGit.pending_local_changes()
+        if not (GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo and numberofchanges == 0 and not bpy.data.is_dirty):
             return False
         GinderGit.refetch()
         (topush, topull) = GinderGit.pending_synch_changes()        
         return topush == 0 and topull > 0
 
     def execute(self, context):
-        if not (GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo):
+        numberofchanges = GinderGit.pending_local_changes()
+        if not (GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo and numberofchanges == 0 and not bpy.data.is_dirty):
             report_error('ERROR', 'Cannot pull changes from remote repo.')
             return {'CANCELLED'}
         try:
@@ -1449,6 +1453,7 @@ class PullFromRemoteOperator(bpy.types.Operator):
             (topush, topull) = GinderGit.pending_synch_changes()
             if topull > 0:
                 GinderGit.pull(False)
+                bpy.ops.wm.revert_mainfile()
             if topush > 0:
                 report_error('ERROR', f'Pulling from {GinderGit.remote_reponame} with {topush} pushes open.')
             return {'FINISHED'}
@@ -1469,14 +1474,16 @@ class MergeTheirsOperator(bpy.types.Operator):
     bl_label = "Merge Changes and Keep Remote Versions for Conflicts"
     @classmethod
     def poll(cls, context):
-        if not (GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo):
+        numberofchanges = GinderGit.pending_local_changes()
+        if not (GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo and numberofchanges == 0 and not bpy.data.is_dirty):
             return False
         GinderGit.refetch()
         (topush, topull) = GinderGit.pending_synch_changes()        
         return topush > 0 and topull > 0
 
     def execute(self, context):
-        if not (GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo):
+        numberofchanges = GinderGit.pending_local_changes()
+        if not (GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo and numberofchanges == 0 and not bpy.data.is_dirty):
             report_error('ERROR', 'Cannot merge changes with remote repo.')
             return {'CANCELLED'}
         try:
@@ -1484,6 +1491,7 @@ class MergeTheirsOperator(bpy.types.Operator):
             (topush, topull) = GinderGit.pending_synch_changes()
             if topull > 0:
                 GinderGit.pull(True)
+                bpy.ops.wm.revert_mainfile()
             if topush > 0:
                 GinderGit.push()
             return {'FINISHED'}
@@ -1504,14 +1512,16 @@ class MergeOursOperator(bpy.types.Operator):
     bl_label = "Merge Changes and Keep Local Versions for Conflicts"
     @classmethod
     def poll(cls, context):
-        if not (GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo):
+        numberofchanges = GinderGit.pending_local_changes()
+        if not (GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo and numberofchanges == 0 and not bpy.data.is_dirty):
             return False
         GinderGit.refetch()
         (topush, topull) = GinderGit.pending_synch_changes()        
         return topush > 0 and topull > 0
 
     def execute(self, context):
-        if not (GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo):
+        numberofchanges = GinderGit.pending_local_changes()
+        if not (GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo and numberofchanges == 0 and not bpy.data.is_dirty):
             report_error('ERROR', 'Cannot merge changes with remote repo.')
             return {'CANCELLED'}
         try:
@@ -1519,6 +1529,7 @@ class MergeOursOperator(bpy.types.Operator):
             (topush, topull) = GinderGit.pending_synch_changes()
             if topull > 0:
                 GinderGit.pull(False)
+                bpy.ops.wm.revert_mainfile()
             if topush > 0:
                 GinderGit.push()
             return {'FINISHED'}
@@ -1561,32 +1572,37 @@ class GinderMenu(bpy.types.Menu):
         if GinderState.state == GinderState.UNDEFINED:
             GinderState.init()
 
-        # if GinderState.state == GinderState.GITHUB_REGISTERED:
         layout = self.layout
 
         numberofchanges = GinderGit.pending_local_changes()
-        if  GinderGit.local_repo and numberofchanges > 0:
-            layout.operator(id_for_commit_to_repo_operator, text=f'Commit {numberofchanges} Change{"s" if numberofchanges > 1 else ""} to {GinderGit.local_reponame}', icon='CHECKMARK')
+        if  GinderGit.local_repo and (bpy.data.is_dirty or numberofchanges > 0):
+            if (bpy.data.is_dirty):
+                if numberofchanges == 0:
+                    numberofchanges += 1
+                layout.operator(id_for_commit_to_repo_operator, text=f'Save and Commit {numberofchanges} Change{"s" if numberofchanges > 1 else ""} to {GinderGit.local_reponame}', icon='CHECKMARK')
+            else:
+                layout.operator(id_for_commit_to_repo_operator, text=f'Commit {numberofchanges} Change{"s" if numberofchanges > 1 else ""} to {GinderGit.local_reponame}', icon='CHECKMARK')
         else:
             layout.operator(id_for_commit_to_repo_operator, icon='CHECKMARK')
 
-        if GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo:
+        # Only show the push/pull/sync menu if there is a local repo and a remote repo and there are no changes to commit and the file is saved
+        if GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo and numberofchanges == 0 and not bpy.data.is_dirty:
             GinderGit.refetch()
             (topush, topull) = GinderGit.pending_synch_changes()
             if topush > 0 and topull > 0:
                 # Show the sync submenu
-                text = f'Synchronize {str(topull)}↓ and {str(topush)}↑ commits with {GinderGit.remote_reponame}'
+                text = f'Synchronize {str(topull)}↓ and {str(topush)}↑ Commits With {GinderGit.remote_reponame}'
                 layout.menu('Ginder_Synchronize_menu', text=text, icon='FILE_REFRESH')
             elif topull > 0:
-                text = f'Pull {str(topull)} commits from {GinderGit.remote_reponame}'
+                text = f'Pull {str(topull)} Commit{"s" if topull > 1 else ""} From {GinderGit.remote_reponame}'
                 layout.operator(id_for_pull_from_remote_operator, text=text, icon='SORT_ASC')
             elif topush > 0:
-                text = f'Push {str(topush)} commits to {GinderGit.remote_reponame}'
+                text = f'Push {str(topush)} Commit{"s" if topush > 1 else ""} To {GinderGit.remote_reponame}'
                 layout.operator(id_for_push_to_remote_operator, text=text, icon='SORT_DESC')
             else: # no changes to push or pull
-                layout.operator(id_for_push_to_remote_operator, text = f"Synchronize changes with {GinderGit.remote_reponame}", icon='FILE_REFRESH') # should appear disabled
+                layout.operator(id_for_push_to_remote_operator, text = f"Synchronize Changes With {GinderGit.remote_reponame}", icon='FILE_REFRESH') # should appear disabled
         else:
-            layout.operator(id_for_push_to_remote_operator, text = f"Synchronize changes with remote repo", icon='FILE_REFRESH') # should appear disabled
+            layout.operator(id_for_push_to_remote_operator, text = f"Synchronize Changes With Remote Repo", icon='FILE_REFRESH') # should appear disabled
 
 
         if GinderGit.remote_reponame:
