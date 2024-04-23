@@ -1393,7 +1393,7 @@ class CommitToRepoOperator(bpy.types.Operator):
 #######################################################################################################
 
 class PushToRemoteOperator(bpy.types.Operator):
-    """Push all committed changes to the remote repository"""
+    """Push all committed changes to the remote repository. This option is only available if there are no local uncommitted changes and the current file is saved. Consider reverting or saving the current file."""
     bl_idname = id_for_push_to_remote_operator
     bl_label = "Push Changes to Remote Repo"
 
@@ -1430,7 +1430,7 @@ class PushToRemoteOperator(bpy.types.Operator):
 #######################################################################################################
 
 class PullFromRemoteOperator(bpy.types.Operator):
-    """Pull ahead changes from the remote repository"""
+    """Pull ahead changes from the remote repository. This option is only available if there are no local uncommitted changes and the current file is saved. Consider reverting or saving the current file."""
     bl_idname = id_for_pull_from_remote_operator
     bl_label = "Pull Changes from Remote Repo"
 
@@ -1469,7 +1469,7 @@ class PullFromRemoteOperator(bpy.types.Operator):
 #######################################################################################################
 
 class MergeTheirsOperator(bpy.types.Operator):
-    """Merge the changes on the remote repository with those on the local repository. Prefer keeping the remote changes in case of conflicts."""
+    """Merge the changes on the remote repository with those on the local repository. Prefer keeping the remote changes in case of conflicts. This option is only available if there are no local uncommitted changes and the current file is saved. Consider reverting or saving the current file."""
     bl_idname = id_for_merge_theirs_operator
     bl_label = "Merge Changes and Keep Remote Versions for Conflicts"
     @classmethod
@@ -1507,7 +1507,7 @@ class MergeTheirsOperator(bpy.types.Operator):
 #######################################################################################################
 
 class MergeOursOperator(bpy.types.Operator):
-    """Merge the changes on the remote repository with those on the local repository. Prefer keeping your local changes in case of conflicts."""
+    """Merge the changes on the remote repository with those on the local repository. Prefer keeping your local changes in case of conflicts. This option is only available if there are no local uncommitted changes and the current file is saved. Consider reverting or saving the current file."""
     bl_idname = id_for_merge_ours_operator
     bl_label = "Merge Changes and Keep Local Versions for Conflicts"
     @classmethod
@@ -1585,8 +1585,9 @@ class GinderMenu(bpy.types.Menu):
         else:
             layout.operator(id_for_commit_to_repo_operator, icon='CHECKMARK')
 
-        # Only show the push/pull/sync menu if there is a local repo and a remote repo and there are no changes to commit and the file is saved
-        if GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo and numberofchanges == 0 and not bpy.data.is_dirty:
+        # Only show the push/pull/sync menu item if there is a local repo and a remote repo and there. Show the correct option based on the ahead/behind status even if there are local changes.
+        # In case of local commits or an unsaved file, the push/pull/sync options will be disabled by the respective operators' poll methods.
+        if GinderGit.github_user and GinderGit.local_repo and GinderGit.remote_repo: # and numberofchanges == 0 and not bpy.data.is_dirty
             GinderGit.refetch()
             (topush, topull) = GinderGit.pending_synch_changes()
             if topush > 0 and topull > 0:
