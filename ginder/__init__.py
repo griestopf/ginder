@@ -688,7 +688,7 @@ class UIUpdate:
         UIUpdate.endat = endat
         UIUpdate.speed = (endat - UIUpdate.startat) / duration
 
-    @staticmethod
+    @staticmethod  
     def pulse():
         while not UIUpdate.execution_queue.empty():
             function = UIUpdate.execution_queue.get()
@@ -713,10 +713,13 @@ class UIUpdate:
         
         # UIUpdate.area.type is either 'TOPBAR' or 'PREFERENCES'
         # try positively asking for that to avoid crashes
-        if UIUpdate.area and not UIUpdate.area.type == 'EMPTY':
+        # if UIUpdate.area and not UIUpdate.area.type == 'EMPTY':
+        if UIUpdate.area and (UIUpdate.area.type == 'TOPBAR' or UIUpdate.area.type == 'PREFERENCES'):
             # TODO: Make sure the area is still valid
             print(UIUpdate.area.type)
             UIUpdate.area.tag_redraw()
+
+        #print(UIUpdate.area.type, bpy.context.area.type if bpy.context.area else 'NO AREA')
         return UIUpdate.spf
 
 
